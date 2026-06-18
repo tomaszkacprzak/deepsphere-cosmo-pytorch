@@ -58,7 +58,7 @@ def _to_sparse_tensor(L, scale=1.0, dtype=torch.float32):
     L = utils.rescale_L(L, lmax=lmax, scale=scale).tocoo()
     indices = torch.as_tensor(np.vstack((L.row, L.col)), dtype=torch.long)
     values = torch.as_tensor(L.data, dtype=dtype)
-    return torch.sparse_coo_tensor(indices, values, L.shape, dtype=dtype).coalesce()
+    return torch.sparse_coo_tensor(indices, values, L.shape, dtype=dtype, check_invariants=False).coalesce()
 
 
 def _sparse_mm(sparse_matrix, dense_matrix):
