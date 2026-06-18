@@ -9,6 +9,27 @@ from torch.nn import functional as F
 from . import utils
 
 
+_UNSUPPORTED_TF_KWARGS = {
+    "regularizer",
+    "kernel_regularizer",
+    "bias_regularizer",
+    "activity_regularizer",
+    "kernel_constraint",
+    "bias_constraint",
+}
+
+
+def _raise_for_unsupported_tf_kwargs(kwargs):
+    unsupported = sorted(set(kwargs).intersection(_UNSUPPORTED_TF_KWARGS))
+    if unsupported:
+        raise TypeError(
+            "TensorFlow/Keras-style arguments are not supported by the PyTorch port: "
+            f"{', '.join(unsupported)}. Use native PyTorch modules and apply regularization "
+            "in the training loop/optimizer (for example optimizer weight_decay) or by "
+            "adding explicit penalty terms to the loss."
+        )
+
+
 def _activation(activation):
     if activation is None:
         return None
@@ -216,7 +237,7 @@ class GCNN_ResidualLayer(nn.Module):
         self.use_bn = use_bn
         self.alpha = alpha
         layer_kwargs = dict(layer_kwargs)
-        layer_kwargs.pop("regularizer", None)
+        _raise_for_unsupported_tf_kwargs(layer_kwargs)
         if layer_type == "CHEBY":
             self.layer1 = Chebyshev(**layer_kwargs)
             self.layer2 = Chebyshev(**layer_kwargs)

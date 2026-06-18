@@ -17,7 +17,8 @@ For detailed model summaries, install ``torchinfo`` and call::
 """
 
 import math
-
+import torch
+from torch import nn
 import healpy as hp
 import matplotlib.pyplot as plt
 import numpy as np
@@ -32,22 +33,31 @@ from . import plot
 
 
 class HealpyGCNN(nn.Module):
-    """A graph convolutional network using PyTorch modules and HEALPix graph wrappers.
+    """
+    A graph convolutional network using PyTorch modules and the DeepSphere healpy layers.
 
-    Wrapper layers such as :class:`deepsphere.healpy_layers.HealpyChebyshev` are
-    converted to concrete graph layers during ``__init__`` by calling their
-    ``_get_layer(L)`` method with the graph Laplacian (or adjacency matrix for
-    transformer wrappers) that matches the current HEALPix resolution and index
-    set. Concrete user-provided :class:`torch.nn.Module` instances are stored
-    directly in ``layers_use``.
-
-    Layers with input-channel-dependent parameters remain lazy, following the
-    conventions used elsewhere in this package. Call :meth:`initialize` once with
-    an input shape when you need all parameters to exist before constructing an
-    optimizer or loading a state dict.
+    The public class name and constructor signature are preserved from the
+    TensorFlow implementation. Keras ``build(input_shape=...)`` is kept as a
+    shape-validation/eager-initialization compatibility hook; normal PyTorch
+    use can rely on eager construction and lazy initialization on the first
+    ``forward`` pass.
     """
 
     def __init__(self, nside, indices, layers, n_neighbors=8, max_batch_size=None, initial_Fin=None):
+        """
+        Initializes a graph convolutional neural network using the healpy pixelization scheme
+        :param nside: integeger, the nside of the input
+        :param indices: 1d array of inidices, corresponding to the pixel ids of the input of the NN
+        :param layers: a list of layers that will make up the neural network
+        :param n_neighbors: Number of neighbors considered when building the graph, currently supported values are:
+                            8 (default), 20, 40 and 60.
+        :param max_batch_size: Maximal batch size this network is supposed to handle. This determines the number of
+                                splits in the tf.sparse.sparse_dense_matmul operation, which are subsequently applied
+                                independent of the actual batch size. Defaults to None, then no such precautions are
+                                taken, which may cause an error.
+        :param initial_Fin: Initial number of input features. Defaults to None, then like for max_batch_size, there
+                            are no precautions in the tf.sparse.sparse_dense_matmul operation taken.
+        """
         super().__init__()
 
         print("WARNING: This network assumes that everything concerning healpy is in NEST ordering...", flush=True)
@@ -101,6 +111,7 @@ class HealpyGCNN(nn.Module):
             )
         print("indices seem consistent...", flush=True)
 
+        # now we build the actual layers
         layers_use = []
         current_nside = self.nside_in
         current_indices = indices
@@ -134,7 +145,9 @@ class HealpyGCNN(nn.Module):
                             n_matmul_splits += 1
                         actual_layer = layer._get_layer(sphere.L, n_matmul_splits)
                     else:
-                        actual_layer = layer._get_layer(sphere.L)
+                        actual_layer = layer._get_layer(current_L)
+                else:
+                    actual_layer = layer._get_layer(current_L)
                 layers_use.append(actual_layer)
             elif isinstance(layer, (hp_nn.HealpyPool, hp_nn.HealpyPseudoConv, hp_nn.Healpy_ViT)):
                 new_nside = int(current_nside // 2**layer.p)
@@ -156,6 +169,35 @@ class HealpyGCNN(nn.Module):
 
         self.layers_use = nn.ModuleList(layers_use)
 
+    def build(self, input_shape=None, **kwargs):
+        """Compatibility hook for former Keras ``build(input_shape=...)`` calls.
+
+        PyTorch modules are built eagerly in ``__init__`` or lazily during the
+        first ``forward``. If an ``input_shape`` is supplied, this method runs a
+        zero-valued forward pass to initialize lazy modules.
+        """
+
+        if input_shape is None:
+            input_shape = kwargs.get("input_shape")
+        if input_shape is None:
+            return self
+        with torch.no_grad():
+            dummy = torch.zeros(tuple(input_shape), dtype=torch.get_default_dtype())
+            self.forward(dummy)
+        return self
+
+    def save_weights(self, *args, **kwargs):
+        raise RuntimeError(
+            "save_weights/load_weights were TensorFlow/Keras APIs. In the PyTorch port, "
+            "use torch.save(model.state_dict(), path) and model.load_state_dict(torch.load(path))."
+        )
+
+    def load_weights(self, *args, **kwargs):
+        raise RuntimeError(
+            "save_weights/load_weights were TensorFlow/Keras APIs. In the PyTorch port, "
+            "use torch.save(model.state_dict(), path) and model.load_state_dict(torch.load(path))."
+        )
+
     def forward(self, x, training=None):
         """Run a PyTorch forward pass. ``training`` is accepted for migration compatibility."""
         if training is not None:
@@ -165,6 +207,8 @@ class HealpyGCNN(nn.Module):
         for layer in self.layers_use:
             x = layer(x)
         return x
+      
+    call = forward
 
     def initialize(self, input_shape, device=None, dtype=None):
         """Materialize lazy parameters with a one-time dummy forward pass.
