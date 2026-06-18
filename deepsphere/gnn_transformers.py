@@ -1,291 +1,218 @@
+import math
+
 import numpy as np
-
-import tensorflow as tf
-from tensorflow.keras.layers import Layer
-from tensorflow.keras import Model
-
-
+import torch
 from scipy import sparse
+from torch import nn
+
 
 # Helper Functions
 ##################
 
 
-def scaled_dot_product_attention(q, k, v, mask):
-    """Calculate the attention weights.
-    q, k, v must have matching leading dimensions.
-    k, v must have matching penultimate dimension, i.e.: seq_len_k = seq_len_v.
-    The mask has different shapes depending on its type(padding or look ahead)
-    but it must be broadcastable for addition.
+def _as_tensor(inputs):
+    """Convert numpy-like inputs to tensors while leaving tensors untouched."""
+    if torch.is_tensor(inputs):
+        return inputs
+    return torch.as_tensor(inputs, dtype=torch.get_default_dtype())
 
-    Args:
-    q: query shape == (..., seq_len_q, depth)
-    k: key shape == (..., seq_len_k, depth)
-    v: value shape == (..., seq_len_v, depth_v)
-    mask: Float tensor with shape broadcastable
-          to (..., seq_len_q, seq_len_k). Defaults to None.
 
-    Returns:
-    output, attention_weights
+def _activation_module(activation):
+    if activation is None or activation == "linear":
+        return nn.Identity()
+    if isinstance(activation, nn.Module):
+        return activation
+    if callable(activation) and not isinstance(activation, str):
+        class _CallableActivation(nn.Module):
+            def forward(self, x):
+                return activation(x)
+        return _CallableActivation()
+    name = str(activation).lower()
+    if name == "relu":
+        return nn.ReLU()
+    if name == "gelu":
+        return nn.GELU()
+    if name == "tanh":
+        return nn.Tanh()
+    if name == "sigmoid":
+        return nn.Sigmoid()
+    raise ValueError(f"Unsupported activation: {activation!r}")
 
-    Function taken from:
-    https://www.tensorflow.org/text/tutorials/transformer
+
+def scaled_dot_product_attention(q, k, v, mask=None):
+    """Calculate dense scaled dot-product attention with PyTorch tensors.
+
+    ``q``, ``k`` and ``v`` are expected to have shape
+    ``(..., seq_len, depth)``. ``mask`` follows standard PyTorch masking
+    semantics: boolean masks mark entries to suppress, while floating masks are
+    added to the logits (for example, use ``-inf`` for masked logits). The mask
+    must be broadcastable to ``(..., seq_len_q, seq_len_k)``.
     """
+    matmul_qk = torch.matmul(q, k.transpose(-2, -1))
+    scaled_attention_logits = matmul_qk / math.sqrt(k.shape[-1])
 
-    matmul_qk = tf.matmul(q, k, transpose_b=True)  # (..., seq_len_q, seq_len_k)
-
-    # scale matmul_qk
-    dk = tf.cast(tf.shape(k)[-1], tf.keras.mixed_precision.global_policy().compute_dtype)
-    scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
-
-    # add the mask to the scaled tensor.
     if mask is not None:
-        scaled_attention_logits += mask * -1e9
+        mask = mask.to(device=scaled_attention_logits.device)
+        if mask.dtype == torch.bool:
+            scaled_attention_logits = scaled_attention_logits.masked_fill(mask, float("-inf"))
+        else:
+            scaled_attention_logits = scaled_attention_logits + mask.to(dtype=scaled_attention_logits.dtype)
 
-    # softmax is normalized on the last axis (seq_len_k) so that the scores
-    # add up to 1.
-    attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)  # (..., seq_len_q, seq_len_k)
-
-    output = tf.matmul(attention_weights, v)  # (..., seq_len_q, depth_v)
-
+    attention_weights = torch.softmax(scaled_attention_logits, dim=-1)
+    output = torch.matmul(attention_weights, v)
     return output, attention_weights
 
 
-def scaled_dot_product_sparse_attention(q, k, v, mask):
-    """Calculate the attention weights.
-    q, k, v must have matching leading dimensions.
-    k, v must have matching penultimate dimension, i.e.: seq_len_k = seq_len_v.
-    The mask is given as a 2D array of indices corresponding to the adjacency
+def _segment_softmax(values, segment_ids, num_segments):
+    """Softmax over entries sharing the same segment id.
 
-    Args:
-    q: query shape == (..., seq_len_q, depth)
-    k: key shape == (..., seq_len_k, depth)
-    v: value shape == (..., seq_len_v, depth_v)
-    mask: 2D array of sparse indices coming from the adjacency matrix of the underlying graph
-
-    Returns:
-    output
-
-    Function taken from:
-    https://www.tensorflow.org/text/tutorials/transformer
+    This local helper uses ``scatter_reduce_``/``scatter_add_`` so the sparse
+    attention path does not require the optional ``torch-scatter`` package.
     """
+    if values.numel() == 0:
+        return values
 
-    # shape for scale and matrix
-    dim = tf.shape(k)
-    dk = tf.cast(dim[-1], tf.float32)
+    expand_shape = (num_segments,) + values.shape[1:]
+    index = segment_ids.view(-1, *([1] * (values.dim() - 1))).expand_as(values)
 
-    # lookup of key and query (need a reorder because lookup is only first dim and currently we have
-    # (batch, num_heads, sequence, embed)
-    q = tf.transpose(q, [2, 0, 1, 3])
-    q_part = tf.nn.embedding_lookup(params=q, ids=mask[:, 0])
-    k = tf.transpose(k, [2, 0, 1, 3])
-    k_part = tf.nn.embedding_lookup(params=k, ids=mask[:, 1])
+    maxima = torch.full(expand_shape, -torch.inf, dtype=values.dtype, device=values.device)
+    maxima.scatter_reduce_(0, index, values, reduce="amax", include_self=True)
 
-    # now the scaled dot product
-    matmul_qk = tf.reduce_sum(q_part * k_part, axis=-1, keepdims=True) / tf.math.sqrt(dk)
+    shifted = values - maxima.index_select(0, segment_ids)
+    exp_values = torch.exp(shifted)
 
-    # one option would be to transform matmul_qk into a sparse matrix and then use sparse softmax and
-    # sparse dense matmul to do the weighted sum of the values. However, this would require to duplicate the
-    # indices (mask) for every head and element in the batch. We therefore perform another embedding lookup for the
-    # values and then do the weighted sum with the segmented sum.
-    v = tf.transpose(v, [2, 0, 1, 3])
-    v_part = tf.nn.embedding_lookup(params=v, ids=mask[:, 1])
+    denom = torch.zeros(expand_shape, dtype=values.dtype, device=values.device)
+    denom.scatter_add_(0, index, exp_values)
+    return exp_values / denom.index_select(0, segment_ids).clamp_min(torch.finfo(values.dtype).tiny)
 
-    # get the unscales softmax
-    unscaled_softmax = tf.exp(matmul_qk)
-    weighted_values = v_part * unscaled_softmax
 
-    # get the weights
-    softmax_sum = tf.math.segment_sum(data=unscaled_softmax, segment_ids=mask[:, 0])
-    value_sum = tf.math.segment_sum(data=weighted_values, segment_ids=mask[:, 0])
+def scaled_dot_product_sparse_attention(q, k, v, mask):
+    """Calculate sparse scaled dot-product attention from adjacency indices.
 
-    # this is now a tensor with shape (sequence, batch, num_heads, depth_v)
-    output = value_sum / softmax_sum
-    output = tf.transpose(output, [1, 2, 0, 3])
+    ``q``, ``k`` and ``v`` have shape ``(batch, heads, nodes, depth)``. ``mask``
+    is a two-column tensor of ``(query_node, key_node)`` sparse adjacency
+    indices. A grouped softmax over each query node is implemented with native
+    PyTorch scatter operations.
+    """
+    if mask.numel() == 0:
+        return torch.zeros_like(q)
 
-    return output
+    mask = mask.to(device=q.device, dtype=torch.long)
+    row = mask[:, 0]
+    col = mask[:, 1]
+    num_nodes = q.shape[-2]
+
+    q_part = q.index_select(2, row).permute(2, 0, 1, 3)
+    k_part = k.index_select(2, col).permute(2, 0, 1, 3)
+    logits = (q_part * k_part).sum(dim=-1, keepdim=True) / math.sqrt(k.shape[-1])
+
+    weights = _segment_softmax(logits, row, num_nodes)
+    v_part = v.index_select(2, col).permute(2, 0, 1, 3)
+    weighted_values = v_part * weights
+
+    output_seq_first = torch.zeros(
+        (num_nodes,) + weighted_values.shape[1:], dtype=weighted_values.dtype, device=weighted_values.device
+    )
+    index = row.view(-1, 1, 1, 1).expand_as(weighted_values)
+    output_seq_first.scatter_add_(0, index, weighted_values)
+    return output_seq_first.permute(1, 2, 0, 3)
 
 
 # Layers
 ########
 
 
-class AddPositionEmbs(Layer):
-    """Adds (optionally learned) positional embeddings to the inputs."""
+class AddPositionEmbs(nn.Module):
+    """Adds learned positional embeddings to the inputs."""
 
     def __init__(self, posemb_init=None, **kwargs):
-        """
-        Initialized the learnable weights of the positional embedding
-        :param posemb_init: Initializer of the learnable weights
-        :param kwargs: Additional keyword arguments passed to the __init__ of the TF Layer class
-
-        Function taken from:
-        https://github.com/tensorflow/models/blob/master/official/projects/vit/modeling/vit.py
-        """
-        super().__init__(**kwargs)
+        super().__init__()
         self.posemb_init = posemb_init
+        self.pos_embedding = None
 
-    def build(self, inputs_shape):
-        """
-        Builds the layer with a given input shape
-        :param inputs_shape: Input shape for the layer
-        """
-        pos_emb_shape = (1, inputs_shape[1], inputs_shape[2])
-        self.pos_embedding = self.add_weight("pos_embedding", pos_emb_shape, initializer=self.posemb_init)
+    def build(self, inputs_shape, device=None, dtype=None):
+        pos_emb_shape = (1, int(inputs_shape[1]), int(inputs_shape[2]))
+        self.pos_embedding = nn.Parameter(torch.empty(pos_emb_shape, device=device, dtype=dtype))
+        if self.posemb_init is not None:
+            with torch.no_grad():
+                initialized = self.posemb_init(self.pos_embedding)
+                if initialized is not None:
+                    self.pos_embedding.copy_(initialized)
+        else:
+            nn.init.trunc_normal_(self.pos_embedding, std=0.02)
 
-    def call(self, inputs):
-        """
-        Calls the layer and adds the positional encodings to the input tensor
-        :param inputs: inputs to which the positional encoding will be added
-        """
-        # inputs.shape is (batch_size, seq_len, emb_dim).
-        pos_embedding = tf.cast(self.pos_embedding, inputs.dtype)
+    def forward(self, inputs):
+        if self.pos_embedding is None:
+            self.build(inputs.shape, device=inputs.device, dtype=inputs.dtype)
+        return inputs + self.pos_embedding.to(dtype=inputs.dtype, device=inputs.device)
 
-        return inputs + pos_embedding
+    call = forward
 
 
-class MultiHeadAttention(Model):
-    """
-    A simple multi head attention layer followed by a single layer MLP according to
-    https://www.tensorflow.org/text/tutorials/transformer
-    """
+class MultiHeadAttention(nn.Module):
+    """A simple multi-head attention layer followed by a single-layer MLP."""
 
     def __init__(self, d_model, num_heads, use_norm=True, activation="relu", sparse_A_indices=None):
-        """
-        Initializes the multiheaded attention layer.
-        :param d_model: dimension of the key, query and value (total, will be split to the heads)
-        :param num_heads: Number of head in the layer
-        :param use_norm: If true, use layer norm
-        :param sparse_A_indices: Indices used as an attention mask, assumes that the occupancy of the matrix is
-                                 extremely low (< 1%) and uses tf.nn.embedding_lookup to perform the masking
-        """
-        super(MultiHeadAttention, self).__init__()
+        super().__init__()
         self.num_heads = num_heads
         self.d_model = d_model
         self.use_norm = use_norm
         if sparse_A_indices is not None:
-            self.sparse_A_indices = tf.convert_to_tensor(sparse_A_indices, dtype=tf.int64)
+            self.register_buffer("sparse_A_indices", torch.as_tensor(sparse_A_indices, dtype=torch.long))
         else:
-            self.sparse_A_indices = None
+            self.register_buffer("sparse_A_indices", None)
 
         assert d_model % self.num_heads == 0
-
         self.depth = d_model // self.num_heads
 
-        self.wq = tf.keras.layers.Dense(d_model)
-        self.wk = tf.keras.layers.Dense(d_model)
-        self.wv = tf.keras.layers.Dense(d_model)
+        self.wq = nn.Linear(d_model, d_model)
+        self.wk = nn.Linear(d_model, d_model)
+        self.wv = nn.Linear(d_model, d_model)
 
-        if self.use_norm:
-            self.layer_norm1 = tf.keras.layers.LayerNormalization()
-            self.layer_norm2 = tf.keras.layers.LayerNormalization()
-
-        self.activation_layer = tf.keras.layers.Activation(activation)
-
-        self.dense = tf.keras.layers.Dense(d_model)
+        self.layer_norm1 = nn.LayerNorm(d_model) if self.use_norm else nn.Identity()
+        self.layer_norm2 = nn.LayerNorm(d_model) if self.use_norm else nn.Identity()
+        self.activation_layer = _activation_module(activation)
+        self.dense = nn.Linear(d_model, d_model)
 
     def split_heads(self, x, batch_size):
-        """Split the last dimension into (num_heads, depth).
-        Transpose the result such that the shape is (batch_size, num_heads, seq_len, depth)
-        :param x: input the split
-        :param batch_size: batch size for the reshape
-        """
-        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
-        return tf.transpose(x, perm=[0, 2, 1, 3])
+        x = x.reshape(batch_size, -1, self.num_heads, self.depth)
+        return x.permute(0, 2, 1, 3)
 
-    def call(self, inputs, mask=None):
-        """
-        Calls the layer
-        :param inputs: The input used for the multi headed attention
-        :param mask: mask to apply to the attention must be broadcastable to the q, k product. This will be ignored
-                     if the layer was initialized with sparse_A_indices
-        """
-        batch_size = tf.shape(inputs)[0]
-
-        # norm before input
+    def forward(self, inputs, mask=None):
+        inputs = _as_tensor(inputs).to(next(self.parameters()).device)
+        batch_size = inputs.shape[0]
         inputs = self.layer_norm1(inputs)
 
-        q = self.wq(inputs)  # (batch_size, seq_len, d_model)
-        k = self.wk(inputs)  # (batch_size, seq_len, d_model)
-        v = self.wv(inputs)  # (batch_size, seq_len, d_model)
+        q = self.split_heads(self.wq(inputs), batch_size)
+        k = self.split_heads(self.wk(inputs), batch_size)
+        v = self.split_heads(self.wv(inputs), batch_size)
 
-        q = self.split_heads(q, batch_size)  # (batch_size, num_heads, seq_len_q, depth)
-        k = self.split_heads(k, batch_size)  # (batch_size, num_heads, seq_len_k, depth)
-        v = self.split_heads(v, batch_size)  # (batch_size, num_heads, seq_len_v, depth)
-
-        # scaled_attention.shape == (batch_size, num_heads, seq_len_q, depth)
-        # attention_weights.shape == (batch_size, num_heads, seq_len_q, seq_len_k)
         if self.sparse_A_indices is None:
-            scaled_attention, attention_weights = scaled_dot_product_attention(q, k, v, mask)
+            scaled_attention, _ = scaled_dot_product_attention(q, k, v, mask)
         else:
             scaled_attention = scaled_dot_product_sparse_attention(q, k, v, self.sparse_A_indices)
 
-        scaled_attention = tf.transpose(
-            scaled_attention, perm=[0, 2, 1, 3]
-        )  # (batch_size, seq_len_q, num_heads, depth)
-
-        concat_attention = tf.reshape(
-            scaled_attention, (batch_size, -1, self.d_model)
-        )  # (batch_size, seq_len_q, d_model)
-
-        # residual connection
+        scaled_attention = scaled_attention.permute(0, 2, 1, 3)
+        concat_attention = scaled_attention.reshape(batch_size, -1, self.d_model)
         concat_attention = inputs + concat_attention
-
-        # layer norm
         output = self.layer_norm2(concat_attention)
-
-        output = self.dense(output)  # (batch_size, seq_len_q, d_model)
-
-        # activation and res
+        output = self.dense(output)
         output = self.activation_layer(output)
-        output = output + concat_attention
+        return output + concat_attention
 
-        return output
+    call = forward
 
 
-class Graph_ViT(Model):
-    """
-    A visual transformer layer for (healpy) graphs
+class Graph_ViT(nn.Module):
+    """A visual transformer layer for (healpy) graphs."""
 
-    This visual transformer is a very simple implementation of a transformer. It is based on the tutorial
-    https://www.tensorflow.org/text/tutorials/transformer
-    and the simple parts of
-    https://github.com/tensorflow/models/tree/master/official/projects/vit
-    note that this could be far more advanced and should be used as a starting point.
-
-    The individual patches of the graph are healpy superpixels with a size of 4**p and the whole layer can be
-    repeated multiple times.
-    """
-
-    def __init__(
-        self, p, key_dim, num_heads, positional_encoding=True, n_layers=1, activation="relu", layer_norm=True
-    ):
-        """
-        Creates a visual transformer according to:
-        https://arxiv.org/pdf/2010.11929.pdf
-        by dividing the healpy graph into super pixels
-        :param p: reduction factor >1 of the nside -> number of nodes reduces by 4^p, note that the layer only checks
-                  if the dimensionality of the input is evenly divisible by 4^p and not if the ordering is correct
-                  (should be nested ordering)
-        :param key_dim: Dimension of the key, query and value for the embedding in the multi head attention for each
-                        head. Note that this means that the initial embedding will be key_dim*num_heads
-        :param num_heads: Number of heads to learn in the multi head attention
-        :param positional_encoding: If True, add positional encoding to the superpixel embedding in the beginning.
-        :param n_layers: Number of TransformerEncoding layers after the initial embedding
-        :param activation: The activation function to use for the multiheaded attention
-        :param layer_norm: If layernorm should be used for the multiheaded attention
-        """
-
-        # This is necessary for every Layer
-        super(Graph_ViT, self).__init__()
-
-        # check p
+    def __init__(self, p, key_dim, num_heads, positional_encoding=True, n_layers=1, activation="relu", layer_norm=True):
+        super().__init__()
         if not p > 1:
             raise IOError("The super pixel size factor p has to be at least 1!")
         else:
             print(f"Every patch consists of {4**p} HEALPix pixels")
 
-        # save variables
         self.p = p
         self.embed_filter_size = int(4**p)
         self.key_dim = key_dim
@@ -296,99 +223,51 @@ class Graph_ViT(Model):
         self.activation = activation
         self.layer_norm = layer_norm
 
-        # create the embedding with a conv1D with correct strides and filters
-        self.embed = tf.keras.layers.Conv1D(
-            self.embedding_size,
-            self.embed_filter_size,
-            strides=self.embed_filter_size,
-            padding="valid",
-            data_format="channels_last",
+        self.embed = nn.LazyConv1d(
+            self.embedding_size, kernel_size=self.embed_filter_size, stride=self.embed_filter_size, padding=0
         )
-        if self.positional_encoding:
-            self.pos_encoder = AddPositionEmbs()
-
-        # the multiheaded attention layers
+        self.pos_encoder = AddPositionEmbs() if self.positional_encoding else None
         assert n_layers >= 1, "Number of attention layers should be at least 1"
-        self.mha_layers = []
-        for i in range(n_layers):
-            self.mha_layers.append(
+        self.mha_layers = nn.ModuleList(
+            [
                 MultiHeadAttention(
                     d_model=self.embedding_size,
                     num_heads=self.num_heads,
                     use_norm=self.layer_norm,
                     activation=self.activation,
                 )
-            )
+                for _ in range(n_layers)
+            ]
+        )
 
     def build(self, input_shape):
-        """
-        Builds the layer given an input shape
-        :param input_shape: shape of the input
-        """
-
-        # deal with the initial embedding
         n_nodes = int(input_shape[1])
         if n_nodes % self.embed_filter_size != 0:
             raise IOError(
-                f"Input shape {input_shape} not compatible with the embedding filter " f"size {self.embed_filter_size}"
+                f"Input shape {input_shape} not compatible with the embedding filter size {self.embed_filter_size}"
             )
-        self.embed.build(input_shape)
 
-        # add the positional encoding
-        if self.positional_encoding:
-            self.pos_encoder.build(inputs_shape=input_shape)
-
-    def call(self, inputs):
-        """
-        Calls the layer and performs all the operations
-        :param inputs: inputs to which the positional encoding will be added
-        """
-
-        # perform the initial embedding
-        x = self.embed(inputs)
-
-        # add position embedding
-        if self.positional_encoding:
+    def forward(self, inputs):
+        inputs = _as_tensor(inputs)
+        if inputs.shape[1] % self.embed_filter_size != 0:
+            raise IOError(
+                f"Input shape {tuple(inputs.shape)} not compatible with the embedding filter size {self.embed_filter_size}"
+            )
+        x = self.embed(inputs.permute(0, 2, 1)).permute(0, 2, 1)
+        if self.pos_encoder is not None:
             x = self.pos_encoder(x)
-
-        # apply the attention layers
         for mha in self.mha_layers:
             x = mha(x)
-
         return x
 
+    call = forward
 
-class Graph_Transformer(Model):
-    """
-    A graph transformer layer for that takes edges information from the adjacency matrix
 
-    This transformer is based on
-    https://arxiv.org/pdf/2012.09699.pdf
-    note that this could be far more advanced and should be used as a starting point.
+class Graph_Transformer(nn.Module):
+    """A graph transformer layer that takes edge information from an adjacency matrix."""
 
-    Since the input of the network is expected to be always the same graph type, we do not use the eigenvector
-    positional encoding but go for the standard positional encoding. Furthermore, the edge information is used
-    as a mask in the softmax without any edge features.
-    """
-
-    def __init__(
-        self, A, key_dim, num_heads, positional_encoding=True, n_layers=1, activation="relu", layer_norm=True
-    ):
-        """
-        :param A: The adjacency matrix of the graph
-        :param key_dim: Dimension of the key, query and value for the embedding in the multi head attention for each
-                        head. Note that this means that the initial embedding will be key_dim*num_heads
-        :param num_heads: Number of heads to learn in the multi head attention
-        :param positional_encoding: If True, add positional encoding to the superpixel embedding in the beginning.
-        :param n_layers: Number of TransformerEncoding layers after the initial embedding
-        :param activation: The activation function to use for the multiheaded attention
-        :param layer_norm: If layernorm should be used for the multiheaded attention
-        """
-
-        # This is necessary for every Layer
-        super(Graph_Transformer, self).__init__()
-
-        # save variables
+    def __init__(self, A, key_dim, num_heads, positional_encoding=True, n_layers=1, activation="relu", layer_norm=True):
+        super().__init__()
         self.A = A
         self.key_dim = key_dim
         self.num_heads = num_heads
@@ -398,20 +277,14 @@ class Graph_Transformer(Model):
         self.activation = activation
         self.layer_norm = layer_norm
 
-        # get the necessary stuff from the adjacency matrix, the indices returned by scipy with nonzero have the
-        # same ordering as TF SparseTensor
-        self.sparse_A_indices = tf.constant(np.array(sparse.csc_matrix.nonzero(self.A)).T, dtype=tf.int64)
+        sparse_A_indices = np.array(sparse.csc_matrix.nonzero(self.A)).T
+        self.register_buffer("sparse_A_indices", torch.as_tensor(sparse_A_indices, dtype=torch.long))
 
-        # create the embedding with a simple dense layer -> keep all the nodes
-        self.embed = tf.keras.layers.Dense(self.embedding_size)
-        if self.positional_encoding:
-            self.pos_encoder = AddPositionEmbs()
-
-        # the multiheaded attention layers
+        self.embed = nn.LazyLinear(self.embedding_size)
+        self.pos_encoder = AddPositionEmbs() if self.positional_encoding else None
         assert n_layers >= 1, "Number of attention layers should be at least 1"
-        self.mha_layers = []
-        for i in range(n_layers):
-            self.mha_layers.append(
+        self.mha_layers = nn.ModuleList(
+            [
                 MultiHeadAttention(
                     d_model=self.embedding_size,
                     num_heads=self.num_heads,
@@ -419,36 +292,19 @@ class Graph_Transformer(Model):
                     activation=self.activation,
                     sparse_A_indices=self.sparse_A_indices,
                 )
-            )
+                for _ in range(n_layers)
+            ]
+        )
 
     def build(self, input_shape):
-        """
-        Builds the layer given an input shape
-        :param input_shape: shape of the input
-        """
+        return None
 
-        # deal with the initial embedding
-        self.embed.build(input_shape)
-
-        # add the positional encoding
-        if self.positional_encoding:
-            self.pos_encoder.build(inputs_shape=input_shape)
-
-    def call(self, inputs):
-        """
-        Calls the layer and performs all the operations
-        :param inputs: inputs to which the positional encoding will be added
-        """
-
-        # perform the initial embedding
-        x = self.embed(inputs)
-
-        # add position embedding
-        if self.positional_encoding:
+    def forward(self, inputs):
+        x = self.embed(_as_tensor(inputs))
+        if self.pos_encoder is not None:
             x = self.pos_encoder(x)
-
-        # apply the attention layers
         for mha in self.mha_layers:
             x = mha(x)
-
         return x
+
+    call = forward
