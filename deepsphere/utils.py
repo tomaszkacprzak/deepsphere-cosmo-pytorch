@@ -3,7 +3,8 @@
 import numpy as np
 from scipy import sparse
 import healpy as hp
-import tensorflow as tf
+import torch
+from torch import nn
 
 
 def extend_indices(indices, nside_in, nside_out, nest=True):
@@ -46,54 +47,52 @@ def rescale_L(L, lmax=2, scale=1):
     return L
 
 
-@tf.function
 def split_sparse_dense_matmul(sparse_tensor, dense_tensor, n_splits=1):
     """
-    Splits axis 1 of the dense_tensor such that tensorflow can handle the size of the computation.
-    :param sparse_tensor: Input sparse tensor of rank 2.
+    Multiply a rank-2 PyTorch sparse tensor by a rank-2 dense tensor.
+
+    Splits axis 1 of ``dense_tensor`` when requested so large GPU sparse matrix
+    multiplications can be run in smaller chunks.
+    :param sparse_tensor: Input PyTorch sparse tensor of rank 2.
     :param dense_tensor: Input dense tensor of rank 2.
-    :param n_splits: Integer number of splits applied to axis 1 of dense_tensor.
-
-    For reference, the error message to be avoided is:
-
-    'Cannot use GPU when output.shape[1] * nnz(a) > 2^31 [Op:SparseTensorDenseMatMul]
-
-    Call arguments received by layer "chebyshev" (type Chebyshev):
-    • input_tensor=tf.Tensor(shape=(208, 7264, 128), dtype=float32)
-    • training=False'
+    :param n_splits: Integer number of chunks applied to axis 1 of dense_tensor.
     """
+    if n_splits < 1:
+        raise ValueError("n_splits must be at least 1")
+
+    sparse_tensor = sparse_tensor.to(device=dense_tensor.device, dtype=dense_tensor.dtype)
+
     if n_splits > 1:
-        print(
-            f"Tracing... Due to tensor size, tf.sparse.sparse_dense_matmul is executed over {n_splits} splits."
-            f" Beware of the resulting performance penalty."
-        )
-        dense_splits = tf.split(dense_tensor, n_splits, axis=1)
-        result = []
-        for dense_split in dense_splits:
-            result.append(tf.sparse.sparse_dense_matmul(sparse_tensor, dense_split))
-        result = tf.concat(result, axis=1)
-    else:
-        result = tf.sparse.sparse_dense_matmul(sparse_tensor, dense_tensor)
+        dense_splits = torch.tensor_split(dense_tensor, n_splits, dim=1)
+        result = [torch.sparse.mm(sparse_tensor, dense_split) for dense_split in dense_splits]
+        return torch.cat(result, dim=1)
 
-    return result
+    return torch.sparse.mm(sparse_tensor, dense_tensor)
 
 
-class GaussianNoiseLayer(tf.keras.layers.Layer):
+class GaussianNoiseLayer(nn.Module):
     """
-    A layer that adds Gaussian noise to the input, where the standard deviation of the Gaussian can be set channel-wise
+    A layer that adds Gaussian noise to the input, where the standard deviation of the Gaussian can be set channel-wise.
     """
 
-    def __init__(self, stddev, **kwargs):
-        super(GaussianNoiseLayer, self).__init__(**kwargs)
-        self.stddev = tf.convert_to_tensor(stddev, dtype=tf.float32)
+    def __init__(self, stddev):
+        super(GaussianNoiseLayer, self).__init__()
+        self.register_buffer("stddev", torch.as_tensor(stddev, dtype=torch.float32))
 
-    def build(self, input_shape):
-        if len(self.stddev.shape) == 0:
-            self.stddev = tf.ones((input_shape[-1],)) * self.stddev
-        elif self.stddev.shape[0] != input_shape[-1]:
+    def _stddev_for(self, inputs):
+        if self.stddev.ndim == 0:
+            return self.stddev.to(device=inputs.device, dtype=inputs.dtype)
+        if self.stddev.ndim != 1:
+            raise ValueError("stddev must be a scalar or a 1D tensor of per-channel standard deviations")
+        if self.stddev.shape[0] != inputs.shape[-1]:
             raise ValueError("Length of stddev does not match the number of input channels")
+        return self.stddev.to(device=inputs.device, dtype=inputs.dtype).view(*([1] * (inputs.ndim - 1)), -1)
+
+    def forward(self, inputs):
+        inputs = torch.as_tensor(inputs)
+        stddev = self._stddev_for(inputs)
+        noise = torch.randn_like(inputs) * stddev
+        return inputs + noise
 
     def call(self, inputs):
-        noise = tf.random.normal(shape=tf.shape(inputs), mean=0.0, stddev=self.stddev)
-
-        return inputs + noise
+        return self.forward(inputs)

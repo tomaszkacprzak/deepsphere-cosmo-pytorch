@@ -4,7 +4,7 @@ import tempfile
 import pytest
 import numpy as np
 import matplotlib.pyplot as plt
-import tensorflow as tf
+import torch
 import healpy as hp
 
 from deepsphere import healpy_layers as hp_nn
@@ -14,9 +14,6 @@ from deepsphere import HealpyGCNN
 def test_HealpyGCNN_plotting():
     # create dir for plots
     os.makedirs("./tests/test_plots", exist_ok=True)
-
-    # clear session
-    tf.keras.backend.clear_session()
 
     # we get a random map
     nside_in = 256
@@ -32,10 +29,10 @@ def test_HealpyGCNN_plotting():
               hp_nn.HealpyPseudoConv(p=2, Fout=16),
               hp_nn.HealpyMonomial(K=5, Fout=32),
               hp_nn.Healpy_ResidualLayer("CHEBY", layer_kwargs={"K": 5}),
-              tf.keras.layers.Flatten(),
-              tf.keras.layers.Dense(4)]
+              torch.nn.Flatten(),
+              torch.nn.Linear(3072 * 32, 4)]
 
-    tf.random.set_seed(11)
+    torch.manual_seed(11)
     model = HealpyGCNN(nside=nside_in, indices=indices, layers=layers)
     model.build(input_shape=(3, n_pix, 1))
     model.summary()
@@ -83,13 +80,10 @@ def test_HealpyGCNN_plotting():
     # get the output
     out = model(m_in)
 
-    assert out.numpy().shape == (3, 4)
+    assert out.shape == (3, 4)
 
 
 def test_HealpyGCNN():
-    # clear session
-    tf.keras.backend.clear_session()
-
     # we get a random map
     nside_in = 256
     n_pix = hp.nside2npix(nside_in)
@@ -114,45 +108,44 @@ def test_HealpyGCNN():
               hp_nn.Healpy_Transformer(key_dim=8, num_heads=4, n_layers=2),
               hp_nn.Healpy_ResidualLayer("CHEBY", layer_kwargs={"K": 5}),
               hp_nn.Healpy_ResidualLayer("CHEBY", layer_kwargs={"K": 5}),
-              tf.keras.layers.Flatten(),
-              tf.keras.layers.Dense(4)]
+              torch.nn.Flatten(),
+              torch.nn.Linear(3072 * 32, 4)]
 
-    tf.random.set_seed(11)
+    torch.manual_seed(11)
     model = HealpyGCNN(nside=nside_in, indices=indices, layers=layers)
     model.build(input_shape=(3, n_pix, 1))
     model.summary(line_length=128)
 
     out = model(m_in)
 
-    assert out.numpy().shape == (3,4)
+    assert out.shape == (3,4)
 
     # now we check if we can save this
     with tempfile.TemporaryDirectory() as tempdir:
         # save the current weight
-        model.save_weights(tempdir)
+        torch.save(model.state_dict(), os.path.join(tempdir, "model.pt"))
 
         # create new model
-        tf.random.set_seed(12)
+        torch.manual_seed(12)
         model = HealpyGCNN(nside=nside_in, indices=indices, layers=layers)
         model.build(input_shape=(3, n_pix, 1))
         out_new = model(m_in, training=False)
 
         # output should be different
-        assert not np.all(np.isclose(out.numpy(), out_new.numpy()))
+        assert not np.all(np.isclose(out.detach().cpu().numpy(), out_new.detach().cpu().numpy()))
 
         # restore weights
-        model.load_weights(tempdir)
+        model.load_state_dict(torch.load(os.path.join(tempdir, "model.pt")))
 
         # now it should be the same
         out_new = model(m_in, training=False)
-        assert np.all(np.isclose(out.numpy(), out_new.numpy(), atol=1e-6))
+        assert np.all(np.isclose(out.detach().cpu().numpy(), out_new.detach().cpu().numpy(), atol=1e-6))
 
     # test the use 4 graphing
     with pytest.raises(NotImplementedError):
         model = HealpyGCNN(nside=nside_in, indices=indices, layers=layers, n_neighbors=12)
 
     # more channels
-    tf.keras.backend.clear_session()
 
     # we get a random map
     nside_in = 256
@@ -170,14 +163,14 @@ def test_HealpyGCNN():
               hp_nn.HealpyPseudoConv(p=2, Fout=16),
               hp_nn.HealpyMonomial(K=5, Fout=32),
               hp_nn.Healpy_ResidualLayer("CHEBY", layer_kwargs={"K": 5}),
-              tf.keras.layers.Flatten(),
-              tf.keras.layers.Dense(4)]
+              torch.nn.Flatten(),
+              torch.nn.Linear(3072 * 32, 4)]
 
-    tf.random.set_seed(11)
+    torch.manual_seed(11)
     model = HealpyGCNN(nside=nside_in, indices=indices, layers=layers)
     model.build(input_shape=(3, n_pix, 2))
     model.summary(line_length=128)
 
     out = model(m_in, training=True)
 
-    assert out.numpy().shape == (3, 4)
+    assert out.shape == (3, 4)
