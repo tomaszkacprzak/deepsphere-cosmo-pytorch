@@ -4,18 +4,18 @@
 [Nathanaël Perraudin](https://perraudin.info),
 [Michaël Defferrard](https://deff.ch)
 
-This is an implementation of DeepSphere using TensorFlow 2.x.
+This is an implementation of DeepSphere using PyTorch.
 
 ## Resources
 
 Code:
 * [deepsphere-cosmo-tf1](https://github.com/deepsphere/deepsphere-cosmo-tf1): original repository, implemented in TensorFlow v1. \
   Use to reproduce [`arxiv:1810.12186`][paper_cosmo].
-* [deepsphere-cosmo-tf2](https://github.com/deepsphere/deepsphere-cosmo-tf2): reimplementation in TFv2. \
-  Use for new developments in TensorFlow targeting HEALPix, including generative models.
+* [deepsphere-cosmo-tf2](https://github.com/deepsphere/deepsphere-cosmo-tf2): historical reimplementation in TFv2. \
+  Use as a reference for TensorFlow targeting HEALPix, including generative models.
 * [deepsphere-tf1](https://github.com/deepsphere/deepsphere-tf1): extended to other samplings and experiments, implemented in TFv1. \
   Use to reproduce [`arxiv:2012.15000`][paper_iclr].
-* [deepsphere-pytorch](https://github.com/deepsphere/deepsphere-pytorch): reimplementation in PyTorch. \
+* [deepsphere-cosmo-pytorch](https://github.com/deepsphere/deepsphere-cosmo-pytorch): this PyTorch implementation for HEALPix cosmology experiments. \
   Use for new developments in PyTorch.
 
 Papers:
@@ -34,24 +34,24 @@ Papers:
 
 1. Clone this repository.
    ```sh
-   git clone https://github.com/deepsphere/deepsphere-cosmo-tf2.git
-   cd deepsphere-cosmo-tf2
+   git clone https://github.com/deepsphere/deepsphere-cosmo-pytorch.git
+   cd deepsphere-cosmo-pytorch
    ```
 
-2. Install the dependencies.
-   ```sh
-   pip install -r requirements.txt
-   ```
-   **Note**: the code has been developed and tested with Python 3.6.
-   It **does not** work on Python 2.7!
-
-3. Install the package.
+2. Install the package and its dependencies.
    ```sh
    pip install -e .
    ```
 
-4. (Optional) Test the installation.
+   PyTorch (`torch`) is the primary deep learning dependency. Sparse graph support remains based on SciPy and PyGSP; `torch-geometric` is not required by the current package.
+
+3. Install development tools if you want to run tests and linters.
+   ```sh
+   pip install pytest pytest-cov pre-commit black flake8
    ```
+
+4. (Optional) Test the installation.
+   ```sh
    pytest tests
    ```
 
@@ -59,6 +59,34 @@ Papers:
    ```sh
    jupyter notebook
    ```
+
+## PyTorch module example
+
+DeepSphere layers follow the `torch.nn.Module` style in the PyTorch port. A typical model composes layers in an `nn.Module` and implements `forward`:
+
+```python
+import torch
+from torch import nn
+
+
+class SphericalClassifier(nn.Module):
+    def __init__(self, deepsphere_block, n_classes):
+        super().__init__()
+        self.features = deepsphere_block
+        self.classifier = nn.Linear(deepsphere_block.out_channels, n_classes)
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.mean(dim=1)
+        return self.classifier(x)
+```
+
+The notebooks below are kept as historical references until their full examples are ported to PyTorch.
+
+## Legacy installation notes
+
+Older TensorFlow-specific setup instructions have been removed from this PyTorch README. If you need the TensorFlow version, see the historical `deepsphere-cosmo-tf2` repository.
+
 
 ## Notebooks
 
