@@ -1,8 +1,46 @@
 [build-system]
-requires = ['setuptools']
-build-backend = 'setuptools.build_meta'
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepsphere"
+dynamic = ["version"]
+description = "DeepSphere in PyTorch for HEALPix spherical CNNs."
+readme = "README.md"
+authors = [
+    { name = "Fluri Janis", email = "janis.fluri@inf.ethz.ch" },
+]
+keywords = ["healpy", "graph convolutions"]
+dependencies = [
+    "numpy",
+    "scipy",
+    "healpy",
+    "torch",
+    "matplotlib",
+    "PyGSP @ git+https://github.com/jafluri/pygsp.git@sphere-graphs",
+    "tqdm",
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "pre-commit",
+    "black",
+    "flake8",
+]
+
+[project.urls]
+Homepage = "https://github.com/deepsphere"
+
+[tool.setuptools.dynamic]
+version = { attr = "deepsphere.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["deepsphere*"]
 
 [tool.black]
 line-length = 120
-target-version = ['py311']
+target-version = ["py311"]
 include = '\.pyi?$'

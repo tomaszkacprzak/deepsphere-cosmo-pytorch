@@ -4,18 +4,12 @@
 [Nathanaël Perraudin](https://perraudin.info),
 [Michaël Defferrard](https://deff.ch)
 
-This is an implementation of DeepSphere using TensorFlow 2.x.
+This is an implementation of DeepSphere using PyTorch.
 
 ## Resources
 
 Code:
-* [deepsphere-cosmo-tf1](https://github.com/deepsphere/deepsphere-cosmo-tf1): original repository, implemented in TensorFlow v1. \
-  Use to reproduce [`arxiv:1810.12186`][paper_cosmo].
-* [deepsphere-cosmo-tf2](https://github.com/deepsphere/deepsphere-cosmo-tf2): reimplementation in TFv2. \
-  Use for new developments in TensorFlow targeting HEALPix, including generative models.
-* [deepsphere-tf1](https://github.com/deepsphere/deepsphere-tf1): extended to other samplings and experiments, implemented in TFv1. \
-  Use to reproduce [`arxiv:2012.15000`][paper_iclr].
-* [deepsphere-pytorch](https://github.com/deepsphere/deepsphere-pytorch): reimplementation in PyTorch. \
+* [deepsphere-cosmo-pytorch](https://github.com/deepsphere/deepsphere-cosmo-pytorch): this PyTorch implementation for HEALPix cosmology experiments. \
   Use for new developments in PyTorch.
 
 Papers:
@@ -34,24 +28,24 @@ Papers:
 
 1. Clone this repository.
    ```sh
-   git clone https://github.com/deepsphere/deepsphere-cosmo-tf2.git
-   cd deepsphere-cosmo-tf2
+   git clone https://github.com/deepsphere/deepsphere-cosmo-pytorch.git
+   cd deepsphere-cosmo-pytorch
    ```
 
-2. Install the dependencies.
-   ```sh
-   pip install -r requirements.txt
-   ```
-   **Note**: the code has been developed and tested with Python 3.6.
-   It **does not** work on Python 2.7!
-
-3. Install the package.
+2. Install the package and its dependencies.
    ```sh
    pip install -e .
    ```
 
-4. (Optional) Test the installation.
+   PyTorch (`torch`) is the primary deep learning dependency. Sparse graph support remains based on SciPy and PyGSP; `torch-geometric` is not required by the current package.
+
+3. Install development tools if you want to run tests and linters.
+   ```sh
+   pip install pytest pytest-cov pre-commit black flake8
    ```
+
+4. (Optional) Test the installation.
+   ```sh
    pytest tests
    ```
 
@@ -59,6 +53,41 @@ Papers:
    ```sh
    jupyter notebook
    ```
+
+## PyTorch module example
+
+DeepSphere layers follow the `torch.nn.Module` style in the PyTorch port. A typical model composes layers in an `nn.Module` and implements `forward`:
+
+```python
+import torch
+from torch import nn
+
+
+class SphericalClassifier(nn.Module):
+    def __init__(self, deepsphere_block, n_classes):
+        super().__init__()
+        self.features = deepsphere_block
+        self.classifier = nn.Linear(deepsphere_block.out_channels, n_classes)
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.mean(dim=1)
+        return self.classifier(x)
+```
+
+The notebooks below are kept as historical references until their full examples are ported to PyTorch.
+
+## Tensor layout
+
+The PyTorch port uses the public DeepSphere tensor layout
+`(batch, nodes, channels)`. Public layers should accept and return that layout.
+
+Internally, the implementation transposes only at the boundary of PyTorch
+layers that require channel-first tensors, such as `torch.nn.Conv1d`,
+`torch.nn.MaxPool1d`, and `torch.nn.AvgPool1d`. Use the internal layout helpers
+`deepsphere.utils.nodes_channels_to_channels_nodes(x)` and
+`deepsphere.utils.channels_nodes_to_nodes_channels(x)` for these boundaries
+instead of adding ad hoc `permute(0, 2, 1)` calls.
 
 ## Notebooks
 
@@ -71,9 +100,9 @@ The below notebooks contain examples and experiments to play with the model.
 3. [Generative Models.][generative]
    How to build an auto-encoder using spherical data and the transpose healpy pseudo convolutions.
 
-[whole_sphere]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-tf2/blob/master/examples/quick_start.ipynb
-[advanced]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-tf2/blob/master/examples/advanced_tutorial.ipynb
-[generative]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-tf2/blob/master/examples/generative_models.ipynb
+[whole_sphere]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-pytorch/blob/master/examples/quick_start.ipynb
+[advanced]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-pytorch/blob/master/examples/advanced_tutorial.ipynb
+[generative]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-pytorch/blob/master/examples/generative_models.ipynb
 
 ## License & citation
 
