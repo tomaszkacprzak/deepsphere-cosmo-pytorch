@@ -831,6 +831,8 @@ class HealpySmoothing(_HealpyModule):
         theta_split = np.array_split(theta, n_theta_splits)
         list_dist_k, list_inds_k = [], []
         for theta_ in tqdm(theta_split, total=n_theta_splits, desc="querying the tree"):
+            if len(theta_) == 0:
+                continue
             dist_k, inds_k = tree.query(theta_, k=self.max_neighbors, return_distance=True, sort_results=True)
             list_dist_k.append(dist_k)
             list_inds_k.append(inds_k)

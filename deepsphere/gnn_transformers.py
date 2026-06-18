@@ -261,6 +261,7 @@ class Graph_ViT(nn.Module):
             )
 
     def forward(self, inputs):
+        input_is_tensor = torch.is_tensor(inputs)
         inputs = _as_tensor(inputs)
         if inputs.shape[1] % self.embed_filter_size != 0:
             raise IOError(
@@ -271,7 +272,7 @@ class Graph_ViT(nn.Module):
             x = self.pos_encoder(x)
         for mha in self.mha_layers:
             x = mha(x)
-        return x
+        return x if input_is_tensor else x.detach()
 
     call = forward
 
@@ -314,11 +315,12 @@ class Graph_Transformer(nn.Module):
         return None
 
     def forward(self, inputs):
+        input_is_tensor = torch.is_tensor(inputs)
         x = self.embed(_as_tensor(inputs))
         if self.pos_encoder is not None:
             x = self.pos_encoder(x)
         for mha in self.mha_layers:
             x = mha(x)
-        return x
+        return x if input_is_tensor else x.detach()
 
     call = forward
