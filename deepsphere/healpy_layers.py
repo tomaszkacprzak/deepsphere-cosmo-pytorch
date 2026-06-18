@@ -861,13 +861,16 @@ class HealpySmoothing(_HealpyModule):
         """Build and register the normalized torch sparse COO kernel."""
         indices = torch.as_tensor(np.asarray(self.ind_coo).T, dtype=torch.long)
         values = torch.as_tensor(np.asarray(self.val_coo), dtype=torch.float32)
-        sparse_kernel = torch.sparse_coo_tensor(indices, values, (self.n_indices, self.n_indices)).coalesce()
+        sparse_kernel = torch.sparse_coo_tensor(
+            indices, values, (self.n_indices, self.n_indices), check_invariants=False
+        ).coalesce()
         row_sum = torch.sparse.sum(sparse_kernel, dim=1).to_dense().clamp_min(torch.finfo(values.dtype).eps)
         row_indices = sparse_kernel.indices()[0]
         sparse_kernel = torch.sparse_coo_tensor(
             sparse_kernel.indices(),
             sparse_kernel.values() / row_sum[row_indices],
             sparse_kernel.shape,
+            check_invariants=False,
         ).coalesce()
         self.sparse_kernel = sparse_kernel
 
