@@ -11,7 +11,7 @@ def nodes_channels_to_channels_nodes(x):
 
     Public DeepSphere PyTorch layers accept tensors shaped
     ``(batch, nodes, channels)`` for API compatibility with the historical
-    TensorFlow implementation. Use this helper immediately before PyTorch
+    implementation. Use this helper immediately before PyTorch
     modules such as ``Conv1d``, ``MaxPool1d``, ``AvgPool1d``, or
     ``BatchNorm1d`` that require ``(batch, channels, nodes)`` inputs.
     """
@@ -77,8 +77,7 @@ def split_sparse_dense_matmul(sparse_tensor, dense_tensor, n_splits=1):
     :param dense_tensor: Input dense tensor of rank 2.
     :param n_splits: Integer number of splits applied to axis 1 of dense_tensor.
 
-    This is retained as a PyTorch replacement for the historical TensorFlow
-    helper that split very large sparse/dense matmul calls.
+    This helper splits very large sparse/dense matmul calls in PyTorch.
     """
     if n_splits > 1:
         print(

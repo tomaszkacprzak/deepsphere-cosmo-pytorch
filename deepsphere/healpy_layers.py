@@ -56,7 +56,7 @@ def _raise_for_unsupported_tf_kwargs(kwargs):
     )
     if unsupported:
         raise TypeError(
-            "TensorFlow/Keras-style arguments are not supported by the PyTorch port: "
+            "Legacy Keras-style arguments are not supported by the PyTorch port: "
             f"{', '.join(unsupported)}. Use torch.nn modules and PyTorch optimizer/loss "
             "regularization instead."
         )

@@ -9,12 +9,6 @@ This is an implementation of DeepSphere using PyTorch.
 ## Resources
 
 Code:
-* [deepsphere-cosmo-tf1](https://github.com/deepsphere/deepsphere-cosmo-tf1): original repository, implemented in TensorFlow v1. \
-  Use to reproduce [`arxiv:1810.12186`][paper_cosmo].
-* [deepsphere-cosmo-tf2](https://github.com/deepsphere/deepsphere-cosmo-tf2): historical reimplementation in TFv2. \
-  Use as a reference for TensorFlow targeting HEALPix, including generative models.
-* [deepsphere-tf1](https://github.com/deepsphere/deepsphere-tf1): extended to other samplings and experiments, implemented in TFv1. \
-  Use to reproduce [`arxiv:2012.15000`][paper_iclr].
 * [deepsphere-cosmo-pytorch](https://github.com/deepsphere/deepsphere-cosmo-pytorch): this PyTorch implementation for HEALPix cosmology experiments. \
   Use for new developments in PyTorch.
 
@@ -85,10 +79,8 @@ The notebooks below are kept as historical references until their full examples 
 
 ## Tensor layout
 
-The PyTorch port preserves the public DeepSphere tensor layout
-`(batch, nodes, channels)` for API compatibility with the historical
-DeepSphere TensorFlow implementations. Public layers should accept and return
-that layout.
+The PyTorch port uses the public DeepSphere tensor layout
+`(batch, nodes, channels)`. Public layers should accept and return that layout.
 
 Internally, the implementation transposes only at the boundary of PyTorch
 layers that require channel-first tensors, such as `torch.nn.Conv1d`,
@@ -96,11 +88,6 @@ layers that require channel-first tensors, such as `torch.nn.Conv1d`,
 `deepsphere.utils.nodes_channels_to_channels_nodes(x)` and
 `deepsphere.utils.channels_nodes_to_nodes_channels(x)` for these boundaries
 instead of adding ad hoc `permute(0, 2, 1)` calls.
-
-## Legacy installation notes
-
-Older TensorFlow-specific setup instructions have been removed from this PyTorch README. If you need the TensorFlow version, see the historical `deepsphere-cosmo-tf2` repository.
-
 
 ## Notebooks
 
@@ -113,9 +100,9 @@ The below notebooks contain examples and experiments to play with the model.
 3. [Generative Models.][generative]
    How to build an auto-encoder using spherical data and the transpose healpy pseudo convolutions.
 
-[whole_sphere]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-tf2/blob/master/examples/quick_start.ipynb
-[advanced]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-tf2/blob/master/examples/advanced_tutorial.ipynb
-[generative]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-tf2/blob/master/examples/generative_models.ipynb
+[whole_sphere]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-pytorch/blob/master/examples/quick_start.ipynb
+[advanced]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-pytorch/blob/master/examples/advanced_tutorial.ipynb
+[generative]: https://nbviewer.jupyter.org/github/deepsphere/deepsphere-cosmo-pytorch/blob/master/examples/generative_models.ipynb
 
 ## License & citation
 
