@@ -23,7 +23,7 @@ def _raise_for_unsupported_tf_kwargs(kwargs):
     unsupported = sorted(set(kwargs).intersection(_UNSUPPORTED_TF_KWARGS))
     if unsupported:
         raise TypeError(
-            "TensorFlow/Keras-style arguments are not supported by the PyTorch port: "
+            "Legacy Keras-style arguments are not supported by the PyTorch port: "
             f"{', '.join(unsupported)}. Use native PyTorch modules and apply regularization "
             "in the training loop/optimizer (for example optimizer weight_decay) or by "
             "adding explicit penalty terms to the loss."

@@ -17,8 +17,7 @@ For detailed model summaries, install ``torchinfo`` and call::
 """
 
 import math
-import torch
-from torch import nn
+
 import healpy as hp
 import matplotlib.pyplot as plt
 import numpy as np
@@ -37,7 +36,7 @@ class HealpyGCNN(nn.Module):
     A graph convolutional network using PyTorch modules and the DeepSphere healpy layers.
 
     The public class name and constructor signature are preserved from the
-    TensorFlow implementation. Keras ``build(input_shape=...)`` is kept as a
+    previous implementation. ``build(input_shape=...)`` is kept as a
     shape-validation/eager-initialization compatibility hook; normal PyTorch
     use can rely on eager construction and lazy initialization on the first
     ``forward`` pass.
@@ -52,11 +51,10 @@ class HealpyGCNN(nn.Module):
         :param n_neighbors: Number of neighbors considered when building the graph, currently supported values are:
                             8 (default), 20, 40 and 60.
         :param max_batch_size: Maximal batch size this network is supposed to handle. This determines the number of
-                                splits in the tf.sparse.sparse_dense_matmul operation, which are subsequently applied
-                                independent of the actual batch size. Defaults to None, then no such precautions are
-                                taken, which may cause an error.
-        :param initial_Fin: Initial number of input features. Defaults to None, then like for max_batch_size, there
-                            are no precautions in the tf.sparse.sparse_dense_matmul operation taken.
+                                sparse-matrix multiplication splits, which are subsequently applied independent of the
+                                actual batch size. Defaults to None, then no such precautions are taken, which may
+                                cause an error.
+        :param initial_Fin: Initial number of input features. Defaults to None.
         """
         super().__init__()
 
@@ -145,9 +143,7 @@ class HealpyGCNN(nn.Module):
                             n_matmul_splits += 1
                         actual_layer = layer._get_layer(sphere.L, n_matmul_splits)
                     else:
-                        actual_layer = layer._get_layer(current_L)
-                else:
-                    actual_layer = layer._get_layer(current_L)
+                        actual_layer = layer._get_layer(sphere.L)
                 layers_use.append(actual_layer)
             elif isinstance(layer, (hp_nn.HealpyPool, hp_nn.HealpyPseudoConv, hp_nn.Healpy_ViT)):
                 new_nside = int(current_nside // 2**layer.p)
@@ -169,32 +165,15 @@ class HealpyGCNN(nn.Module):
 
         self.layers_use = nn.ModuleList(layers_use)
 
-    def build(self, input_shape=None, **kwargs):
-        """Compatibility hook for former Keras ``build(input_shape=...)`` calls.
-
-        PyTorch modules are built eagerly in ``__init__`` or lazily during the
-        first ``forward``. If an ``input_shape`` is supplied, this method runs a
-        zero-valued forward pass to initialize lazy modules.
-        """
-
-        if input_shape is None:
-            input_shape = kwargs.get("input_shape")
-        if input_shape is None:
-            return self
-        with torch.no_grad():
-            dummy = torch.zeros(tuple(input_shape), dtype=torch.get_default_dtype())
-            self.forward(dummy)
-        return self
-
     def save_weights(self, *args, **kwargs):
         raise RuntimeError(
-            "save_weights/load_weights were TensorFlow/Keras APIs. In the PyTorch port, "
+            "save_weights/load_weights are not available in the PyTorch port. "
             "use torch.save(model.state_dict(), path) and model.load_state_dict(torch.load(path))."
         )
 
     def load_weights(self, *args, **kwargs):
         raise RuntimeError(
-            "save_weights/load_weights were TensorFlow/Keras APIs. In the PyTorch port, "
+            "save_weights/load_weights are not available in the PyTorch port. "
             "use torch.save(model.state_dict(), path) and model.load_state_dict(torch.load(path))."
         )
 
@@ -213,7 +192,7 @@ class HealpyGCNN(nn.Module):
     def initialize(self, input_shape, device=None, dtype=None):
         """Materialize lazy parameters with a one-time dummy forward pass.
 
-        This replaces Keras ``build(input_shape=...)`` expectations. Provide a
+        This supports ``build(input_shape=...)`` expectations. Provide a
         full ``(batch, nodes, channels)`` input shape before creating an
         optimizer or before loading a saved ``state_dict`` into a fresh model.
         """
@@ -226,7 +205,14 @@ class HealpyGCNN(nn.Module):
         self._initialized = True
         return self
 
-    build = initialize
+
+    def build(self, input_shape=None, **kwargs):
+        """Materialize lazy parameters using a full ``(batch, nodes, channels)`` input shape."""
+        if input_shape is None:
+            input_shape = kwargs.get("input_shape")
+        if input_shape is None:
+            return self
+        return self.initialize(input_shape)
 
     def summary(self, input_shape=None, line_length=120):
         """Print a lightweight summary; use ``torchinfo.summary`` for full details."""
@@ -291,37 +277,37 @@ class HealpyGCNN(nn.Module):
             raise ValueError("layer should be either string or int.")
 
         # check if the layer is actually the right type
-        if isinstance(tf_layer, gnn.GCNN_ResidualLayer):
-            if not (isinstance(tf_layer.layer1, gnn.Chebyshev) and isinstance(tf_layer.layer2, gnn.Chebyshev)):
+        if isinstance(torch_layer, gnn.GCNN_ResidualLayer):
+            if not (isinstance(torch_layer.layer1, gnn.Chebyshev) and isinstance(torch_layer.layer2, gnn.Chebyshev)):
                 raise ValueError(
-                    f"The requested layer ({layer}) is of type {type(tf_layer)}, but only "
+                    f"The requested layer ({layer}) is of type {type(torch_layer)}, but only "
                     f"Chebyshev5 or GCNN_ResidualLayer layers (with Chebyshev5 sublayers) "
                     f"are supported..."
                 )
-        elif not isinstance(tf_layer, gnn.Chebyshev):
+        elif not isinstance(torch_layer, gnn.Chebyshev):
             raise ValueError(
-                f"The requested layer ({layer}) is of type {type(tf_layer)}, but only "
+                f"The requested layer ({layer}) is of type {type(torch_layer)}, but only "
                 f"Chebyshev5 or GCNN_ResidualLayer layers (with Chebyshev5 sublayers) "
                 f"are supported..."
             )
 
         # we get the weights
-        if isinstance(tf_layer, gnn.GCNN_ResidualLayer):
+        if isinstance(torch_layer, gnn.GCNN_ResidualLayer):
             # get the weights
-            # print(tf_layer.layer1.kernel)
-            weight1 = self._get_filter_coeffs(tf_layer.layer1, ind_in=ind_in, ind_out=ind_out)
-            weight2 = self._get_filter_coeffs(tf_layer.layer2, ind_in=ind_in, ind_out=ind_out)
+            # print(torch_layer.layer1.kernel)
+            weight1 = self._get_filter_coeffs(torch_layer.layer1, ind_in=ind_in, ind_out=ind_out)
+            weight2 = self._get_filter_coeffs(torch_layer.layer2, ind_in=ind_in, ind_out=ind_out)
             weights = [weight1, weight2]
 
             # get the size of the features
-            n_features = tf_layer.layer1.L_shape[0]
+            n_features = torch_layer.layer1.L_shape[0]
 
         else:
             # get the weights and reshape
-            weight1 = self._get_filter_coeffs(tf_layer, ind_in=ind_in, ind_out=ind_out)
+            weight1 = self._get_filter_coeffs(torch_layer, ind_in=ind_in, ind_out=ind_out)
             weights = [weight1]
             # get the size of the features
-            n_features = tf_layer.L_shape[0]
+            n_features = torch_layer.L_shape[0]
 
         if return_weights:
             return weights
