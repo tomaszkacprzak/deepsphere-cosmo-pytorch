@@ -101,3 +101,15 @@ def test_GCNN_ResidualLayer():
         gnn_layers.GCNN_ResidualLayer(
             layer_type="CHEBY", layer_kwargs=layer_kwargs, activation="relu", use_bn=True, norm_type="moving_norm"
         )
+
+
+def test_sparse_laplacian_buffer_moves_with_model_device():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    layer = gnn_layers.Chebyshev(L=_sym_laplacian(), K=2, Fout=2).to(device)
+    assert "sparse_L" in dict(layer.named_buffers())
+    assert layer.sparse_L.device == device
+    assert layer.sparse_L.dtype == torch.float32
+    assert layer.sparse_L.indices().dtype == torch.long
+    x = torch.randn(2, 3, 4, device=device)
+    out = layer(x)
+    assert out.device == device

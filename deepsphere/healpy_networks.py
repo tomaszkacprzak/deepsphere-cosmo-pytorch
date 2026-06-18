@@ -256,14 +256,14 @@ class HealpyGCNN(Sequential):
             weights = [weight1, weight2]
 
             # get the size of the features
-            n_features = tf_layer.layer1.L.shape[0]
+            n_features = tf_layer.layer1.L_shape[0]
 
         else:
             # get the weights and reshape
             weight1 = self._get_filter_coeffs(tf_layer, ind_in=ind_in, ind_out=ind_out)
             weights = [weight1]
             # get the size of the features
-            n_features = tf_layer.L.shape[0]
+            n_features = tf_layer.L_shape[0]
 
         if return_weights:
             return weights
