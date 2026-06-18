@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
-import tensorflow as tf
+import torch
+import torch.nn.functional as F
 import healpy as hp
 
 from deepsphere import healpy_layers
@@ -23,18 +24,18 @@ def test_HealpyPool():
 
     # avg layer
     avg_layer = healpy_layers.HealpyPool(1, pool_type="AVG")
-    m_avg_tf = avg_layer(m_in[None, :, None])
+    m_avg_torch = avg_layer(m_in[None, :, None])
 
-    assert np.all(np.abs(m_avg - m_avg_tf.numpy().ravel()) < 1e-5)
+    assert np.all(np.abs(m_avg - m_avg_torch.detach().cpu().numpy().ravel()) < 1e-5)
 
     # maxpool normal
     m_max = np.max(m_in.reshape((n_pix//4, 4)), axis=1)
 
     # max layer
     max_layer = healpy_layers.HealpyPool(1, pool_type="MAX")
-    m_max_tf = max_layer(m_in[None, :, None])
+    m_max_torch = max_layer(m_in[None, :, None])
 
-    assert np.all(np.abs(m_max - m_max_tf.numpy().ravel()) < 1e-5)
+    assert np.all(np.abs(m_max - m_max_torch.detach().cpu().numpy().ravel()) < 1e-5)
 
 
 def test_HealpyPseudoConv():
@@ -45,9 +46,9 @@ def test_HealpyPseudoConv():
 
     # layer
     hp_conv = healpy_layers.HealpyPseudoConv(3, 5)
-    m_conv_tf = hp_conv(m_in[None, :, None])
+    m_conv_torch = hp_conv(m_in[None, :, None])
 
-    assert m_conv_tf.numpy().shape == (1, n_pix//int(4**3), 5)
+    assert m_conv_torch.shape == (1, n_pix//int(4**3), 5)
 
 
 def test_HealpyPseudoConv_Transpose():
@@ -58,24 +59,24 @@ def test_HealpyPseudoConv_Transpose():
 
     # layer
     hp_conv = healpy_layers.HealpyPseudoConv_Transpose(3, 5)
-    m_conv_tf = hp_conv(m_in[None, :, None])
+    m_conv_torch = hp_conv(m_in[None, :, None])
 
-    assert m_conv_tf.numpy().shape == (1, n_pix * int(4 ** 3), 5)
+    assert m_conv_torch.shape == (1, n_pix * int(4 ** 3), 5)
 
 
 def test_HealpyChebyshev():
     # create the layer
-    tf.random.set_seed(11)
-    L = tf.random.normal(shape=(3, 3), seed=11)
+    torch.manual_seed(11)
+    L = torch.randn((3, 3), generator=torch.Generator().manual_seed(11))
     # make sym
-    L = tf.matmul(L, tf.transpose(L))
-    x = tf.random.normal(shape=(5, 3, 7), seed=12)
+    L = L @ L.T
+    x = torch.randn((5, 3, 7), generator=torch.Generator().manual_seed(12))
     Fout = 3
     K = 4
 
     # create the layer
     stddev = 1 / np.sqrt(7 * (K + 0.5) / 2)
-    initializer = tf.initializers.RandomNormal(stddev=stddev, seed=13)
+    initializer = lambda shape: torch.randn(shape, generator=torch.Generator().manual_seed(13)) * stddev
     cheb = healpy_layers.HealpyChebyshev(Fout=Fout, K=K, initializer=initializer)
     cheb = cheb._get_layer(L)
     new = cheb(x)
@@ -88,24 +89,24 @@ def test_HealpyChebyshev():
 def test_HealpyMonomial():
 
     # create the layer
-    tf.random.set_seed(11)
-    L = tf.random.normal(shape=(3, 3), seed=11)
+    torch.manual_seed(11)
+    L = torch.randn((3, 3), generator=torch.Generator().manual_seed(11))
     # make sym
-    L = tf.matmul(L, tf.transpose(L))
-    x = tf.random.normal(shape=(5, 3, 7), seed=12)
+    L = L @ L.T
+    x = torch.randn((5, 3, 7), generator=torch.Generator().manual_seed(12))
     Fout = 3
     K = 4
 
     # create the layer
     stddev = 0.1
-    initializer = tf.initializers.RandomNormal(stddev=stddev, seed=13)
+    initializer = lambda shape: torch.randn(shape, generator=torch.Generator().manual_seed(13)) * stddev
     mon = healpy_layers.HealpyMonomial(Fout=Fout, K=K, initializer=initializer,
-                                       activation=tf.keras.activations.linear)
+                                       activation="linear")
     mon = mon._get_layer(L)
     new = mon(x)
 
     mon = healpy_layers.HealpyMonomial(Fout=Fout, K=K, initializer=initializer,
-                                       activation=tf.keras.activations.linear,
+                                       activation="linear",
                                        use_bias=True,
                                        use_bn=True)
     mon = mon._get_layer(L)
@@ -121,13 +122,12 @@ def test_Healpy_ResidualLayer():
     # layer definition
     layer_type = "CHEBY"
     layer_kwargs = {"K": 5,
-                    "activation": tf.keras.activations.relu,
-                    "regularizer": tf.keras.regularizers.l1}
+                    "activation": "relu"}
 
     res_layer = healpy_layers.Healpy_ResidualLayer(layer_type=layer_type,
                                                    layer_kwargs=layer_kwargs,
-                                                   activation=tf.keras.activations.relu)
+                                                   activation=F.relu)
     res_layer = res_layer._get_layer(np.eye(n_pix, dtype=np.float64))
     out = res_layer(m_in)
 
-    assert out.numpy().shape == (3, n_pix, 7)
+    assert out.shape == (3, n_pix, 7)
