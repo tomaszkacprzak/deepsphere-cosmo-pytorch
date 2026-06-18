@@ -122,7 +122,8 @@ class _GraphPolynomial(nn.Module):
             self.bn = NodeBatchNorm1d(Fout, momentum=0.1, eps=1e-5, affine=False)
 
     def _finalize(self, x, M, Fout):
-        x = torch.matmul(x, self.kernel).reshape(-1, M, Fout)
+        kernel = self.kernel.to(device=x.device, dtype=x.dtype)
+        x = torch.matmul(x, kernel).reshape(-1, M, Fout)
         if self.bn is not None:
             x = self.bn(x)
         if self.bias is not None:
@@ -265,6 +266,7 @@ class GCNN_ResidualLayer(nn.Module):
         return module(x)
 
     def forward(self, input_tensor):
+        input_is_tensor = torch.is_tensor(input_tensor)
         input_tensor = torch.as_tensor(input_tensor)
         x = self.layer1(input_tensor)
         if self.use_bn:
@@ -273,12 +275,14 @@ class GCNN_ResidualLayer(nn.Module):
         if self.use_bn:
             x = self._norm("bn2", x)
         if self.activation is None:
-            return x + input_tensor
-        return (
-            self.activation(x) + self.alpha * input_tensor
-            if self.act_before
-            else self.activation(x + self.alpha * input_tensor)
-        )
+            output = x + input_tensor
+        else:
+            output = (
+                self.activation(x) + self.alpha * input_tensor
+                if self.act_before
+                else self.activation(x + self.alpha * input_tensor)
+            )
+        return output if input_is_tensor else output.detach()
 
 
 class Bernstein(_GraphPolynomial):

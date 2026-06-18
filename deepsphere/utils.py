@@ -4,6 +4,7 @@ import numpy as np
 from scipy import sparse
 import healpy as hp
 import torch
+from torch import nn
 
 
 def nodes_channels_to_channels_nodes(x):
