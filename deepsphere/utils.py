@@ -4,7 +4,30 @@ import numpy as np
 from scipy import sparse
 import healpy as hp
 import torch
-from torch import nn
+
+
+def nodes_channels_to_channels_nodes(x):
+    """Transpose a DeepSphere tensor from public to PyTorch channel-first layout.
+
+    Public DeepSphere PyTorch layers accept tensors shaped
+    ``(batch, nodes, channels)`` for API compatibility with the historical
+    TensorFlow implementation. Use this helper immediately before PyTorch
+    modules such as ``Conv1d``, ``MaxPool1d``, ``AvgPool1d``, or
+    ``BatchNorm1d`` that require ``(batch, channels, nodes)`` inputs.
+    """
+
+    return torch.as_tensor(x).permute(0, 2, 1)
+
+
+def channels_nodes_to_nodes_channels(x):
+    """Transpose a PyTorch channel-first tensor back to public DeepSphere layout.
+
+    This is the inverse of :func:`nodes_channels_to_channels_nodes`, returning
+    tensors shaped ``(batch, nodes, channels)`` from internal
+    ``(batch, channels, nodes)`` tensors.
+    """
+
+    return torch.as_tensor(x).permute(0, 2, 1)
 
 
 def extend_indices(indices, nside_in, nside_out, nest=True):

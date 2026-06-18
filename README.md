@@ -83,31 +83,19 @@ class SphericalClassifier(nn.Module):
 
 The notebooks below are kept as historical references until their full examples are ported to PyTorch.
 
-## TensorFlow to PyTorch migration notes
+## Tensor layout
 
-The PyTorch port preserves the high-level DeepSphere class names and constructor
-signatures where practical, including `HealpyGCNN`, `Chebyshev`, `Monomial`,
-`Bernstein`, `GCNN_ResidualLayer`, `HealpyPool`, `HealpyPseudoConv`,
-`HealpyPseudoConv_Transpose`, `HealpyChebyshev`, `HealpyMonomial`,
-`HealpyBernstein`, `Healpy_ResidualLayer`, `Healpy_ViT`, and
-`Healpy_Transformer`.
+The PyTorch port preserves the public DeepSphere tensor layout
+`(batch, nodes, channels)` for API compatibility with the historical
+DeepSphere TensorFlow implementations. Public layers should accept and return
+that layout.
 
-Use these replacements for TensorFlow-only concepts:
-
-* `build(input_shape=...)` &rarr; eager module construction or lazy
-  initialization during the first `forward` pass. Compatibility `build`
-  methods only validate shapes or initialize lazy PyTorch modules.
-* `call(...)` &rarr; `forward(...)`. Several layers keep `call` as an alias
-  for migration, but new code should use normal `torch.nn.Module` invocation.
-* `save_weights` / `load_weights` &rarr; `state_dict`: use
-  `torch.save(model.state_dict(), path)` and
-  `model.load_state_dict(torch.load(path))`.
-* `tf.keras.layers.Dense` &rarr; `torch.nn.Linear`.
-
-TensorFlow-specific keyword arguments that have no direct PyTorch layer
-equivalent, such as Keras regularizers or constraints, now raise
-deprecation-style `TypeError` messages. Prefer optimizer `weight_decay` or
-explicit loss penalty terms for regularization.
+Internally, the implementation transposes only at the boundary of PyTorch
+layers that require channel-first tensors, such as `torch.nn.Conv1d`,
+`torch.nn.MaxPool1d`, and `torch.nn.AvgPool1d`. Use the internal layout helpers
+`deepsphere.utils.nodes_channels_to_channels_nodes(x)` and
+`deepsphere.utils.channels_nodes_to_nodes_channels(x)` for these boundaries
+instead of adding ad hoc `permute(0, 2, 1)` calls.
 
 ## Legacy installation notes
 
