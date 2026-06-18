@@ -2,14 +2,44 @@ from .gnn_layers import *
 from .gnn_transformers import *
 
 import os
+import numpy as np
+import torch
+from torch import nn
 import healpy as hp
 from sklearn.neighbors import BallTree
 from typing import Union, Optional
 from tqdm import tqdm
-from . import utils
 
 
-class HealpyPool(Model):
+def _as_torch_tensor(x, *, device=None, dtype=None):
+    if isinstance(x, torch.Tensor):
+        return x.to(device=device or x.device, dtype=dtype or x.dtype)
+    return torch.as_tensor(x, device=device, dtype=dtype or torch.get_default_dtype())
+
+
+def _copy_initializer_to_parameter(parameter, initializer):
+    if initializer is None:
+        return
+    try:
+        value = initializer(shape=tuple(parameter.shape))
+    except TypeError:
+        try:
+            value = initializer(tuple(parameter.shape))
+        except TypeError:
+            value = initializer(parameter)
+    if value is not None:
+        with torch.no_grad():
+            parameter.copy_(torch.as_tensor(value, device=parameter.device, dtype=parameter.dtype))
+
+
+class _HealpyModule(nn.Module):
+    """Base module that keeps the old Keras-style ``call`` entry point available."""
+
+    def call(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+
+class HealpyPool(_HealpyModule):
     """
     A pooling layer for healy maps, makes use of the fact that a pixels is always divided into 4 subpixels when
     increasing the nside of a HealPix map
@@ -22,7 +52,7 @@ class HealpyPool(Model):
                   if the dimensionality of the input is evenly divisible by 4^p and not if the ordering is correct
                   (should be nested ordering)
         :param pool_type: type of pooling, can be "MAX" or  "AVG"
-        :param kwargs: additional kwargs passed to the keras pooling layer
+        :param kwargs: additional kwargs passed to the PyTorch pooling layer
         """
         # This is necessary for every Layer
         super(HealpyPool, self).__init__()
@@ -38,21 +68,9 @@ class HealpyPool(Model):
         self.kwargs = kwargs
 
         if pool_type == "MAX":
-            self.filter = tf.keras.layers.MaxPool1D(
-                pool_size=self.filter_size,
-                strides=self.filter_size,
-                padding="valid",
-                data_format="channels_last",
-                **kwargs,
-            )
+            self.filter = nn.MaxPool1d(kernel_size=self.filter_size, stride=self.filter_size, padding=0, **kwargs)
         elif pool_type == "AVG":
-            self.filter = tf.keras.layers.AveragePooling1D(
-                pool_size=self.filter_size,
-                strides=self.filter_size,
-                padding="valid",
-                data_format="channels_last",
-                **kwargs,
-            )
+            self.filter = nn.AvgPool1d(kernel_size=self.filter_size, stride=self.filter_size, padding=0, **kwargs)
         else:
             raise IOError(f"Pooling type not understood: {self.pool_type}")
 
@@ -66,17 +84,14 @@ class HealpyPool(Model):
         if n_nodes % self.filter_size != 0:
             raise IOError("Input shape {input_shape} not compatible with the filter size {self.filter_size}")
 
-    def call(self, input_tensor):
-        """
-        Calls the layer on a input tensor
-        :param input_tensor: input of the layer shape (batch, nodes, channels)
-        :return: the output of the layer
-        """
+    def forward(self, input_tensor):
+        """Apply pooling to a (batch, nodes, channels) tensor."""
 
-        return self.filter(input_tensor)
+        input_tensor = _as_torch_tensor(input_tensor)
+        return self.filter(input_tensor.permute(0, 2, 1)).permute(0, 2, 1)
 
 
-class HealpyPseudoConv(Model):
+class HealpyPseudoConv(_HealpyModule):
     """
     A pseudo convolutional layer on Healpy maps. It makes use of the Healpy pixel scheme and reduces the nside by
     averaging the pixels into bigger pixels using learnable weights
@@ -90,7 +105,7 @@ class HealpyPseudoConv(Model):
                   (should be nested ordering)
         :param Fout: number of output channels
         :param kernel_initializer: initializer for kernel init
-        :param kwargs: additional keyword arguments passed to the kreas 1D conv layer
+        :param kwargs: additional keyword arguments passed to the PyTorch 1D conv layer
         """
         # This is necessary for every Layer
         super(HealpyPseudoConv, self).__init__()
@@ -106,16 +121,7 @@ class HealpyPseudoConv(Model):
         self.kernel_initializer = kernel_initializer
         self.kwargs = kwargs
 
-        # create the files
-        self.filter = tf.keras.layers.Conv1D(
-            self.Fout,
-            self.filter_size,
-            strides=self.filter_size,
-            padding="valid",
-            data_format="channels_last",
-            kernel_initializer=self.kernel_initializer,
-            **self.kwargs,
-        )
+        self.filter = None
 
     def build(self, input_shape):
         """
@@ -126,19 +132,35 @@ class HealpyPseudoConv(Model):
         n_nodes = int(input_shape[1])
         if n_nodes % self.filter_size != 0:
             raise IOError(f"Input shape {input_shape} not compatible with the filter size {self.filter_size}")
-        self.filter.build(input_shape)
+        self._build_filter(int(input_shape[2]))
 
-    def call(self, input_tensor):
-        """
-        Calls the layer on a input tensor
-        :param input_tensor: input of the layer shape (batch, nodes, channels)
-        :return: the output of the layer
-        """
+    def _build_filter(self, in_channels, device=None, dtype=None):
+        if self.filter is not None:
+            return
+        kwargs = dict(self.kwargs)
+        kwargs.pop("data_format", None)
+        kwargs.pop("padding", None)
+        self.filter = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=self.Fout,
+            kernel_size=self.filter_size,
+            stride=self.filter_size,
+            padding=0,
+            **kwargs,
+        )
+        if device is not None or dtype is not None:
+            self.filter.to(device=device, dtype=dtype)
+        _copy_initializer_to_parameter(self.filter.weight, self.kernel_initializer)
 
-        return self.filter(input_tensor)
+    def forward(self, input_tensor):
+        """Apply pseudo-convolution to a (batch, nodes, channels) tensor."""
+
+        input_tensor = _as_torch_tensor(input_tensor)
+        self._build_filter(input_tensor.shape[2], input_tensor.device, input_tensor.dtype)
+        return self.filter(input_tensor.permute(0, 2, 1)).permute(0, 2, 1)
 
 
-class HealpyPseudoConv_Transpose(Model):
+class HealpyPseudoConv_Transpose(_HealpyModule):
     """
     A pseudo transpose convolutional layer on Healpy maps. It makes use of the Healpy pixel scheme and increases
     the nside by applying a transpose convolution to the pixels into bigger pixels using learnable weights
@@ -152,7 +174,7 @@ class HealpyPseudoConv_Transpose(Model):
                   (should be nested ordering)
         :param Fout: number of output channels
         :param kernel_initializer: initializer for kernel init
-        :param kwargs: additional keyword arguments passed to the keras transpose conv layer
+        :param kwargs: additional keyword arguments passed to the PyTorch transpose conv layer
         """
         # This is necessary for every Layer
         super(HealpyPseudoConv_Transpose, self).__init__()
@@ -168,16 +190,7 @@ class HealpyPseudoConv_Transpose(Model):
         self.kernel_initializer = kernel_initializer
         self.kwargs = kwargs
 
-        # create the files
-        self.filter = tf.keras.layers.Conv2DTranspose(
-            self.Fout,
-            (1, self.filter_size),
-            strides=(1, self.filter_size),
-            padding="valid",
-            data_format="channels_last",
-            kernel_initializer=self.kernel_initializer,
-            **self.kwargs,
-        )
+        self.filter = None
 
     def build(self, input_shape):
         """
@@ -190,22 +203,32 @@ class HealpyPseudoConv_Transpose(Model):
         if n_nodes % self.filter_size != 0:
             raise IOError(f"Input shape {input_shape} not compatible with the filter size {self.filter_size}")
 
-        # add the additional dim
-        input_shape.insert(1, 1)
+        self._build_filter(int(input_shape[2]))
 
-        self.filter.build(input_shape)
+    def _build_filter(self, in_channels, device=None, dtype=None):
+        if self.filter is not None:
+            return
+        kwargs = dict(self.kwargs)
+        kwargs.pop("data_format", None)
+        kwargs.pop("padding", None)
+        self.filter = nn.ConvTranspose1d(
+            in_channels=in_channels,
+            out_channels=self.Fout,
+            kernel_size=self.filter_size,
+            stride=self.filter_size,
+            padding=0,
+            **kwargs,
+        )
+        if device is not None or dtype is not None:
+            self.filter.to(device=device, dtype=dtype)
+        _copy_initializer_to_parameter(self.filter.weight, self.kernel_initializer)
 
-    def call(self, input_tensor):
-        """
-        Calls the layer on a input tensor
-        :param input_tensor: input of the layer shape (batch, nodes, channels)
-        :param args: further arguments
-        :param kwargs: further keyword arguments
-        :return: the output of the layer
-        """
+    def forward(self, input_tensor):
+        """Apply pseudo-transpose-convolution to a (batch, nodes, channels) tensor."""
 
-        input_tensor = tf.expand_dims(input_tensor, axis=1)
-        return tf.squeeze(self.filter(input_tensor), axis=1)
+        input_tensor = _as_torch_tensor(input_tensor)
+        self._build_filter(input_tensor.shape[2], input_tensor.device, input_tensor.dtype)
+        return self.filter(input_tensor.permute(0, 2, 1)).permute(0, 2, 1)
 
 
 class HealpyChebyshev:
@@ -238,7 +261,7 @@ class HealpyChebyshev:
         initializes the actual layer, should be called once the graph Laplacian has been calculated
         :param L: the graph laplacian
         :param n_matmul_splits: Number of splits to apply to axis 1 of the dense tensor in the
-                                tf.sparse.sparse_dense_matmul operations to avoid the operation's size limitation
+                                torch.sparse.mm operations to avoid the operation's size limitation
         :return: Chebyshev5 layer that can be called
         """
 
@@ -287,7 +310,7 @@ class HealpyMonomial:
         initializes the actual layer, should be called once the graph Laplacian has been calculated
         :param L: the graph laplacian
         :param n_matmul_splits: Number of splits to apply to axis 1 of the dense tensor in the
-                                tf.sparse.sparse_dense_matmul operations to avoid the operation's size limitation
+                                torch.sparse.mm operations to avoid the operation's size limitation
         :return: Monomial layer that can be called
         """
 
@@ -331,7 +354,7 @@ class Healpy_ResidualLayer:
         :param act_before: use activation before skip connection
         :param use_bn: use batchnorm inbetween the layers
         :param norm_type: type of batch norm, either batch_norm for normal batch norm, layer_norm for
-                          tf.keras.layers.LayerNormalization or moving_norm for special_layer.MovingBatchNorm
+                          torch.nn.LayerNorm or moving_norm for special_layer.MovingBatchNorm
         :param bn_kwargs: An optional dictionary containing further keyword arguments for the normalization layer
         :param alpha: Coupling strength of the input -> layer(input) + alpha*input
         """
@@ -351,7 +374,7 @@ class Healpy_ResidualLayer:
         initializes the actual layer, should be called once the graph Laplacian has been calculated
         :param L: the graph laplacian
         :param n_matmul_splits: Number of splits to apply to axis 1 of the dense tensor in the
-                                tf.sparse.sparse_dense_matmul operations to avoid the operation's size limitation
+                                torch.sparse.mm operations to avoid the operation's size limitation
         :return: GCNN_ResidualLayer layer that can be called
         """
         # we add the graph laplacian to all kwargs
@@ -377,9 +400,7 @@ class Healpy_ViT(Graph_ViT):
     at runtime, it is literally the same as Graph_ViT
     """
 
-    def __init__(
-        self, p, key_dim, num_heads, positional_encoding=True, n_layers=1, activation="relu", layer_norm=True
-    ):
+    def __init__(self, p, key_dim, num_heads, positional_encoding=True, n_layers=1, activation="relu", layer_norm=True):
         """
         Creates a visual transformer according to:
         https://arxiv.org/pdf/2010.11929.pdf
@@ -483,7 +504,7 @@ class HealpyBernstein:
         initializes the actual layer, should be called once the graph Laplacian has been calculated
         :param L: the graph laplacian
         :param n_matmul_splits: Number of splits to apply to axis 1 of the dense tensor in the
-            tf.sparse.sparse_dense_matmul operations to avoid the operation's size limitation
+            torch.sparse.mm operations to avoid the operation's size limitation
         :return: Chebyshev5 layer that can be called
         """
 
@@ -501,7 +522,7 @@ class HealpyBernstein:
         )
 
 
-class HealpySmoothing(Model):
+class HealpySmoothing(_HealpyModule):
     """
     A layer that smoothes a Healpix map with a Gaussian kernel.
     """
@@ -512,7 +533,7 @@ class HealpySmoothing(Model):
         nside: int,
         indices: np.ndarray,
         nest: bool = True,
-        mask: Optional[tf.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
         # smoothing
         fwhm: Optional[Union[int, float, list]] = None,
         sigma: Optional[Union[int, float, list]] = None,
@@ -556,7 +577,7 @@ class HealpySmoothing(Model):
         :param data_path: Path where the sparse kernel tensor is stored to, and if available, loaded from. Defaults to
                           None, then the sparse kernel tensor is neither saved nor loaded.
         :param max_batch_size: Maximal batch size this network is supposed to handle. This determines the number of
-                               splits in the tf.sparse.sparse_dense_matmul operation, which are subsequently applied
+                               splits in the torch.sparse.mm operation, which are subsequently applied
                                independent of the actual batch size. Defaults to None, then an attempt is made to infer
                                this from the input, which may cause an error.
         """
@@ -580,7 +601,8 @@ class HealpySmoothing(Model):
         self.white_noise_sigma = white_noise_sigma
         self.data_path = data_path
         self.max_batch_size = max_batch_size
-        self.layer_compute_dtype = tf.keras.mixed_precision.global_policy().compute_dtype
+        self.register_buffer("mask_buffer", torch.empty(0), persistent=False)
+        self.register_buffer("sparse_kernel", torch.empty(0).to_sparse_coo())
 
         if self.fwhm == 0.0 or self.sigma == 0.0:
             self.do_smoothing = False
@@ -667,7 +689,7 @@ class HealpySmoothing(Model):
         # white noise
         if self.white_noise_sigma is not None:
             print(f"Adding white noise with sigma {self.white_noise_sigma} to the smoothed map")
-            self.white_noise_layer = utils.GaussianNoiseLayer(self.white_noise_sigma)
+            self.white_noise_layer = None
 
             if mask is None:
                 print(
@@ -678,110 +700,69 @@ class HealpySmoothing(Model):
             self.white_noise_layer = None
 
     def build(self, input_shape: tuple) -> None:
-        """
-        Checks whether the input shape is compatible with the initialized layer. Note that the sparse-dense matrix
-        multiplication might be split into multiple operations, depending on the nonzero entries in the sparse kernel
-        matrix and batch dimension.
-        :param input_shape: Shape of the input, which is expected to be (n_batch, n_indices, n_channels).
-        """
-        if self.do_smoothing:
-            # batch dimension
-            if self.max_batch_size is not None:
-                self.n_batch = self.max_batch_size
-            elif input_shape[0] is not None:
-                self.n_batch = input_shape[0]
-            else:
-                self.n_batch = None
-                print(
-                    f"Since the batch size cannot be inferred from the input shape and max_batch_size is not "
-                    f"available, no sparse-dense matmul splits are performed, which may cause an error."
-                )
+        """Validate input shape and prepare optional mask metadata."""
+        if not self.do_smoothing:
+            return
 
-            # map dimensions
-            assert self.n_indices == input_shape[1]
-            self.n_channels = input_shape[2]
+        self.n_batch = self.max_batch_size if self.max_batch_size is not None else input_shape[0]
+        if self.n_batch is None:
+            print(
+                "Since the batch size cannot be inferred from the input shape and max_batch_size is not "
+                "available, no sparse-dense matmul splits are performed."
+            )
 
-            if self.per_channel_repetitions is not None:
-                assert (
-                    len(self.per_channel_repetitions) == self.n_channels
-                ), f"The list per_channel_repetitions has to have length {self.n_channels}"
+        assert self.n_indices == input_shape[1]
+        self.n_channels = input_shape[2]
 
-                assert (
-                    self.per_channel_repetitions.dtype == int
-                ), f"The list per_channel_repetitions has to contain integers only"
+        if self.per_channel_repetitions is not None:
+            assert (
+                len(self.per_channel_repetitions) == self.n_channels
+            ), f"The list per_channel_repetitions has to have length {self.n_channels}"
+            assert (
+                self.per_channel_repetitions.dtype == int
+            ), "The list per_channel_repetitions has to contain integers only"
 
-            if self.mask is not None:
-                self.mask = tf.cast(self.mask, dtype=self.layer_compute_dtype)
-                if tf.rank(self.mask).numpy() == 1:
-                    self.mask = tf.expand_dims(self.mask, axis=0)
-                    self.mask = tf.expand_dims(self.mask, axis=-1)
-                elif tf.rank(self.mask).numpy() == 2:
-                    self.mask = tf.expand_dims(self.mask, axis=0)
+        if self.mask is not None:
+            mask = torch.as_tensor(self.mask, dtype=torch.get_default_dtype())
+            if mask.ndim == 1:
+                mask = mask[None, :, None]
+            elif mask.ndim == 2:
+                mask = mask[None, :, :]
+            assert (
+                mask.shape[1] == self.n_indices
+            ), "The mask has to have shape (1, n_indices, 1) or (1, n_indices, n_channels)"
+            self.mask_buffer = mask
 
-                assert (
-                    self.mask.shape[1] == self.n_indices
-                ), f"The mask has to have shape (1, n_indices, 1) or (1, n_indices, n_channels)"
+        print("Successfully built the smoothing layer")
 
-            self.n_matmul_splits = 1
-            # check if we need to split the matmul
-            if self.n_batch is not None:
-                while not (
-                    # tf.split only does even splits for integer arguments
-                    (self.n_batch % self.n_matmul_splits == 0)
-                    and
-                    # due to the int32 limitation of tf.sparse.sparse_dense_matmul
-                    (self.n_matmul_splits >= self.n_batch * len(self.sparse_kernel.indices) / 2**31)
-                ):
-                    self.n_matmul_splits += 1
-
-            if self.white_noise_layer is not None:
-                self.white_noise_layer.build(input_shape)
-
-            print(f"Successfully built the smoothing layer")
-
-    def call(self, inputs: tf.Tensor) -> tf.Tensor:
-        """
-        Calls the layer on the input tensor.
-        :param inputs: Tensor of shape (n_batch, n_indices, n_channels).
-        :return: Smoothed output tensor of identical shape as input.
-        """
-        if self.do_smoothing:
-            # (n_indices, n_batch, n_channels)
-            indices_first = tf.transpose(inputs, (1, 0, 2))
-
-            # list of (n_indices, n_batch)
-            separate_channels = tf.unstack(indices_first, axis=2)
-
-            stack = []
-            for i, single_channel in enumerate(separate_channels):
-                if self.per_channel_repetitions is not None:
-                    for _ in range(self.per_channel_repetitions[i]):
-                        single_channel = utils.split_sparse_dense_matmul(
-                            self.sparse_kernel, single_channel, self.n_matmul_splits
-                        )
-                else:
-                    single_channel = utils.split_sparse_dense_matmul(
-                        self.sparse_kernel, single_channel, self.n_matmul_splits
-                    )
-
-                stack.append(single_channel)
-
-            # (n_indices, n_batch, n_channels)
-            channels_last = tf.stack(stack, axis=2)
-
-            # (n_batch, n_indices, n_channels)
-            channels_last = tf.transpose(channels_last, (1, 0, 2))
-
-            if self.white_noise_layer is not None:
-                channels_last = self.white_noise_layer(channels_last)
-
-            if self.mask is not None:
-                channels_last *= self.mask
-
-            return channels_last
-
-        else:
+    def forward(self, inputs):
+        """Smooth a (n_batch, n_indices, n_channels) tensor with torch sparse matmul."""
+        if not self.do_smoothing:
             return inputs
+
+        inputs = _as_torch_tensor(inputs)
+        if not hasattr(self, "n_channels"):
+            self.build(tuple(inputs.shape))
+
+        sparse_kernel = self.sparse_kernel.to(device=inputs.device, dtype=inputs.dtype)
+        indices_first = inputs.permute(1, 0, 2)
+        stack = []
+        for i, single_channel in enumerate(torch.unbind(indices_first, dim=2)):
+            repetitions = int(self.per_channel_repetitions[i]) if self.per_channel_repetitions is not None else 1
+            for _ in range(repetitions):
+                single_channel = torch.sparse.mm(sparse_kernel, single_channel)
+            stack.append(single_channel)
+
+        channels_last = torch.stack(stack, dim=2).permute(1, 0, 2)
+
+        if self.white_noise_sigma is not None and self.training:
+            stddev = torch.as_tensor(self.white_noise_sigma, device=inputs.device, dtype=inputs.dtype)
+            channels_last = channels_last + torch.randn_like(channels_last) * stddev
+
+        if self.mask_buffer.numel() > 0:
+            channels_last = channels_last * self.mask_buffer.to(device=inputs.device, dtype=inputs.dtype)
+
+        return channels_last
 
     def _build_tree(self) -> None:
         """
@@ -819,49 +800,34 @@ class HealpySmoothing(Model):
         self.kernel_k = self.kernel_func(dist_k).astype(np.float32)
 
     def _build_kernel(self) -> None:
-        """
-        Builds the indices and values of the coo sparse kernel matrix as dense arrays, which may be stored to disk.
-        """
-        # row, all of the pixels in the patch
-        inds_r = tf.constant(np.arange(self.n_indices), dtype=tf.int64)
-        inds_r = tf.expand_dims(inds_r, axis=-1)
-        inds_r = tf.repeat(inds_r, self.max_neighbors, axis=1)
-
-        # column, all of the pixels that we want to sum over
-        inds_c = tf.constant(self.inds_k, dtype=tf.int64)
-
-        # shape (n_non_zero, 2)
-        self.ind_coo = tf.concat([tf.reshape(inds_r, (-1, 1)), tf.reshape(inds_c, (-1, 1))], axis=1)
-
-        # shape(n_non_zero,)
-        self.val_coo = tf.reshape(self.kernel_k, (-1,))
+        """Build COO sparse kernel indices and values as NumPy arrays."""
+        inds_r = np.repeat(np.arange(self.n_indices, dtype=np.int64)[:, None], self.max_neighbors, axis=1)
+        inds_c = np.asarray(self.inds_k, dtype=np.int64)
+        self.ind_coo = np.stack([inds_r.reshape(-1), inds_c.reshape(-1)], axis=1)
+        self.val_coo = np.asarray(self.kernel_k, dtype=np.float32).reshape(-1)
 
         if self.data_path is not None:
-            np_ind_coo = self.ind_coo.numpy()
-            np_val_coo = self.val_coo.numpy()
             print(
-                f"Storing sparse kernel indices ({np_ind_coo.nbytes/1e9:4.2f} GB, dtype {np_ind_coo.dtype}) and "
-                f"values ({np_val_coo.nbytes/1e9:4.2f} GB, dtype {np_val_coo.dtype})"
+                f"Storing sparse kernel indices ({self.ind_coo.nbytes/1e9:4.2f} GB, dtype {self.ind_coo.dtype}) "
+                f"and values ({self.val_coo.nbytes/1e9:4.2f} GB, dtype {self.val_coo.dtype})"
             )
-
             os.makedirs(self.data_path, exist_ok=True)
-            np.save(os.path.join(self.data_path, f"ind_coo{self.file_label}.npy"), np_ind_coo)
-            np.save(os.path.join(self.data_path, f"val_coo{self.file_label}.npy"), np_val_coo)
+            np.save(os.path.join(self.data_path, f"ind_coo{self.file_label}.npy"), self.ind_coo)
+            np.save(os.path.join(self.data_path, f"val_coo{self.file_label}.npy"), self.val_coo)
 
     def _build_sparse_tensor(self) -> None:
-        """Builds the tf.sparse.SparseTensor from the dense indices and values."""
-        self.val_coo = tf.cast(self.val_coo, dtype=self.layer_compute_dtype)
-
-        self.sparse_kernel = tf.sparse.SparseTensor(
-            indices=self.ind_coo,
-            values=self.val_coo,
-            dense_shape=(self.n_indices, self.n_indices),
-        )
-        self.sparse_kernel = tf.sparse.reorder(self.sparse_kernel)
-
-        # the kernel entries within rows have to sum to one
-        col_sum = tf.sparse.reduce_sum(self.sparse_kernel, axis=1, output_is_sparse=False)
-        self.sparse_kernel = self.sparse_kernel / tf.expand_dims(col_sum, axis=0)
+        """Build and register the normalized torch sparse COO kernel."""
+        indices = torch.as_tensor(np.asarray(self.ind_coo).T, dtype=torch.long)
+        values = torch.as_tensor(np.asarray(self.val_coo), dtype=torch.get_default_dtype())
+        sparse_kernel = torch.sparse_coo_tensor(indices, values, (self.n_indices, self.n_indices)).coalesce()
+        row_sum = torch.sparse.sum(sparse_kernel, dim=1).to_dense().clamp_min(torch.finfo(values.dtype).eps)
+        row_indices = sparse_kernel.indices()[0]
+        sparse_kernel = torch.sparse_coo_tensor(
+            sparse_kernel.indices(),
+            sparse_kernel.values() / row_sum[row_indices],
+            sparse_kernel.shape,
+        ).coalesce()
+        self.sparse_kernel = sparse_kernel
 
         del self.ind_coo
         del self.val_coo
