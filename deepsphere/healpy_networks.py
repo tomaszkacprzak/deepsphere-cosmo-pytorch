@@ -1,7 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import math
-from tensorflow.keras.models import Sequential
+import torch
+from torch import nn
 import healpy as hp
 from pygsp.graphs import SphereHealpix
 from pygsp import filters
@@ -12,9 +13,15 @@ from . import utils
 from . import plot
 
 
-class HealpyGCNN(Sequential):
+class HealpyGCNN(nn.Module):
     """
-    A graph convolutional network using the Keras model API and the layers from the model
+    A graph convolutional network using PyTorch modules and the DeepSphere healpy layers.
+
+    The public class name and constructor signature are preserved from the
+    TensorFlow implementation. Keras ``build(input_shape=...)`` is kept as a
+    shape-validation/eager-initialization compatibility hook; normal PyTorch
+    use can rely on eager construction and lazy initialization on the first
+    ``forward`` pass.
     """
 
     def __init__(self, nside, indices, layers, n_neighbors=8, max_batch_size=None, initial_Fin=None):
@@ -32,8 +39,7 @@ class HealpyGCNN(Sequential):
         :param initial_Fin: Initial number of input features. Defaults to None, then like for max_batch_size, there
                             are no precautions in the tf.sparse.sparse_dense_matmul operation taken.
         """
-        # This is necessary for every Layer
-        super(HealpyGCNN, self).__init__(name="")
+        super().__init__()
 
         print("WARNING: This network assumes that everything concerning healpy is in NEST ordering...", flush=True)
 
@@ -90,7 +96,7 @@ class HealpyGCNN(Sequential):
             print("indices seem consistent...", flush=True)
 
         # now we build the actual layers
-        self.layers_use = []
+        layers_use = []
         current_nside = self.nside_in
         current_indices = indices
 
@@ -140,7 +146,7 @@ class HealpyGCNN(Sequential):
                         actual_layer = layer._get_layer(current_L)
                 else:
                     actual_layer = layer._get_layer(current_L)
-                self.layers_use.append(actual_layer)
+                layers_use.append(actual_layer)
             elif isinstance(layer, (hp_nn.HealpyPool, hp_nn.HealpyPseudoConv, hp_nn.Healpy_ViT)):
                 # a reduction is happening
                 new_nside = int(current_nside // 2**layer.p)
@@ -148,7 +154,7 @@ class HealpyGCNN(Sequential):
                     nside_in=current_nside, nside_out=new_nside, indices=current_indices
                 )
                 current_nside = new_nside
-                self.layers_use.append(layer)
+                layers_use.append(layer)
             elif isinstance(layer, hp_nn.HealpyPseudoConv_Transpose):
                 # a reduction is happening
                 new_nside = int(current_nside * 2**layer.p)
@@ -156,9 +162,9 @@ class HealpyGCNN(Sequential):
                     nside_in=current_nside, nside_out=new_nside, indices=current_indices
                 )
                 current_nside = new_nside
-                self.layers_use.append(layer)
+                layers_use.append(layer)
             else:
-                self.layers_use.append(layer)
+                layers_use.append(layer)
 
             try:
                 current_Fin = layer.Fout
@@ -166,8 +172,75 @@ class HealpyGCNN(Sequential):
                 # don't update, this is for example the case for residual or pooling layers that have Fin = Fout
                 pass
 
-        # Now that we have everything we can super init...
-        super(HealpyGCNN, self).__init__(layers=self.layers_use)
+        self.layers_use = nn.ModuleList(layers_use)
+
+    def forward(self, inputs, *args, **kwargs):
+        """Run the model on ``(batch, nodes, channels)`` tensors."""
+
+        x = inputs if torch.is_tensor(inputs) else torch.as_tensor(inputs, dtype=torch.get_default_dtype())
+        for layer in self.layers_use:
+            try:
+                x = layer(x)
+            except TypeError:
+                # Some user-supplied PyTorch modules do not accept Keras-style
+                # training/mask kwargs. Ignore compatibility kwargs rather than
+                # forwarding them blindly.
+                x = layer(x)
+        return x
+
+    call = forward
+
+    def build(self, input_shape=None, **kwargs):
+        """Compatibility hook for former Keras ``build(input_shape=...)`` calls.
+
+        PyTorch modules are built eagerly in ``__init__`` or lazily during the
+        first ``forward``. If an ``input_shape`` is supplied, this method runs a
+        zero-valued forward pass to initialize lazy modules.
+        """
+
+        if input_shape is None:
+            input_shape = kwargs.get("input_shape")
+        if input_shape is None:
+            return self
+        with torch.no_grad():
+            dummy = torch.zeros(tuple(input_shape), dtype=torch.get_default_dtype())
+            self.forward(dummy)
+        return self
+
+    def get_layer(self, index=None, name=None):
+        """Return a layer by Keras-style integer index or generated class name."""
+
+        if index is not None:
+            return self.layers_use[index]
+        if name is None:
+            raise ValueError("Either index or name has to be specified.")
+
+        normalized = name.lower()
+        seen = {}
+        for layer in self.layers_use:
+            base = layer.__class__.__name__.lower()
+            seen[base] = seen.get(base, 0) + 1
+            candidates = {base, base.replace("_", "__")}
+            if seen[base] > 1:
+                candidates.update({f"{base}_{seen[base] - 1}", f"{base.replace('_', '__')}_{seen[base] - 1}"})
+            if normalized in candidates:
+                return layer
+        raise ValueError(f"No layer found with name {name!r}.")
+
+    def summary(self, *args, **kwargs):
+        print(self)
+
+    def save_weights(self, *args, **kwargs):
+        raise RuntimeError(
+            "save_weights/load_weights were TensorFlow/Keras APIs. In the PyTorch port, "
+            "use torch.save(model.state_dict(), path) and model.load_state_dict(torch.load(path))."
+        )
+
+    def load_weights(self, *args, **kwargs):
+        raise RuntimeError(
+            "save_weights/load_weights were TensorFlow/Keras APIs. In the PyTorch port, "
+            "use torch.save(model.state_dict(), path) and model.load_state_dict(torch.load(path))."
+        )
 
     def _transform_indices(self, nside_in, nside_out, indices):
         """

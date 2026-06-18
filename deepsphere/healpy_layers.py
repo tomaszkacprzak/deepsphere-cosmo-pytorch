@@ -39,6 +39,27 @@ class _HealpyModule(nn.Module):
         return self.forward(*args, **kwargs)
 
 
+def _raise_for_unsupported_tf_kwargs(kwargs):
+    unsupported = sorted(
+        set(kwargs).intersection(
+            {
+                "regularizer",
+                "kernel_regularizer",
+                "bias_regularizer",
+                "activity_regularizer",
+                "kernel_constraint",
+                "bias_constraint",
+            }
+        )
+    )
+    if unsupported:
+        raise TypeError(
+            "TensorFlow/Keras-style arguments are not supported by the PyTorch port: "
+            f"{', '.join(unsupported)}. Use torch.nn modules and PyTorch optimizer/loss "
+            "regularization instead."
+        )
+
+
 class HealpyPool(_HealpyModule):
     """
     A pooling layer for healy maps, makes use of the fact that a pixels is always divided into 4 subpixels when
@@ -56,6 +77,7 @@ class HealpyPool(_HealpyModule):
         """
         # This is necessary for every Layer
         super(HealpyPool, self).__init__()
+        _raise_for_unsupported_tf_kwargs(kwargs)
 
         # check p
         if not p >= 1:
@@ -109,6 +131,7 @@ class HealpyPseudoConv(_HealpyModule):
         """
         # This is necessary for every Layer
         super(HealpyPseudoConv, self).__init__()
+        _raise_for_unsupported_tf_kwargs(kwargs)
 
         # check p
         if not p >= 1:
@@ -178,6 +201,7 @@ class HealpyPseudoConv_Transpose(_HealpyModule):
         """
         # This is necessary for every Layer
         super(HealpyPseudoConv_Transpose, self).__init__()
+        _raise_for_unsupported_tf_kwargs(kwargs)
 
         # check p
         if not p >= 1:
@@ -248,6 +272,7 @@ class HealpyChebyshev:
         :param kwargs: additional keyword arguments passed on to add_weight
         """
         # we only save the variables here
+        _raise_for_unsupported_tf_kwargs(kwargs)
         self.K = K
         self.Fout = Fout
         self.initializer = initializer
@@ -297,6 +322,7 @@ class HealpyMonomial:
         """
 
         # we only save the variables here
+        _raise_for_unsupported_tf_kwargs(kwargs)
         self.K = K
         self.Fout = Fout
         self.initializer = initializer
@@ -360,6 +386,7 @@ class Healpy_ResidualLayer:
         """
 
         # we only save the variables here
+        _raise_for_unsupported_tf_kwargs(layer_kwargs)
         self.layer_type = layer_type
         self.layer_kwargs = layer_kwargs
         self.activation = activation
@@ -449,6 +476,7 @@ class Healpy_Transformer:
         """
 
         # save variables
+        _raise_for_unsupported_tf_kwargs({})
         self.key_dim = key_dim
         self.num_heads = num_heads
         self.positional_encoding = positional_encoding
@@ -491,6 +519,7 @@ class HealpyBernstein:
         :param kwargs: additional keyword arguments passed on to add_weight
         """
         # we only save the variables here
+        _raise_for_unsupported_tf_kwargs(kwargs)
         self.K = K
         self.Fout = Fout
         self.initializer = initializer
