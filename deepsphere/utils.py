@@ -70,12 +70,12 @@ def split_sparse_dense_matmul(sparse_tensor, dense_tensor, n_splits=1):
     else:
         result = torch.sparse.mm(sparse_tensor, dense_tensor)
 
-    return result
+    return torch.sparse.mm(sparse_tensor, dense_tensor)
 
 
 class GaussianNoiseLayer(nn.Module):
     """
-    A layer that adds Gaussian noise to the input, where the standard deviation of the Gaussian can be set channel-wise
+    A layer that adds Gaussian noise to the input, where the standard deviation of the Gaussian can be set channel-wise.
     """
 
     def __init__(self, stddev, **kwargs):
@@ -87,6 +87,7 @@ class GaussianNoiseLayer(nn.Module):
             self.stddev = torch.ones((input_shape[-1],), device=self.stddev.device) * self.stddev
         elif self.stddev.shape[0] != input_shape[-1]:
             raise ValueError("Length of stddev does not match the number of input channels")
+        return self.stddev.to(device=inputs.device, dtype=inputs.dtype).view(*([1] * (inputs.ndim - 1)), -1)
 
     def forward(self, inputs):
         inputs = inputs if torch.is_tensor(inputs) else torch.as_tensor(inputs, dtype=torch.get_default_dtype())

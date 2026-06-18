@@ -41,17 +41,30 @@ def _activation(activation):
     raise ValueError(f"Could not find activation <{activation}> in supported torch activations...")
 
 
-def _to_sparse_tensor(L, scale=1.0):
-    L = sparse.csr_matrix(L)
+def _to_scipy_csr(matrix):
+    if sparse.issparse(matrix):
+        return matrix.tocsr()
+    if torch.is_tensor(matrix):
+        matrix = matrix.detach().cpu().numpy()
+    elif hasattr(matrix, "numpy"):
+        matrix = matrix.numpy()
+    return sparse.csr_matrix(matrix)
+
+
+def _to_sparse_tensor(L, scale=1.0, dtype=torch.float32):
+    """Convert a SciPy/NumPy sparse Laplacian to a coalesced torch sparse COO tensor."""
+    L = _to_scipy_csr(L)
     lmax = 1.02 * eigsh(L, k=1, which="LM", return_eigenvectors=False)[0]
     L = utils.rescale_L(L, lmax=lmax, scale=scale).tocoo()
-    indices = torch.tensor(np.vstack((L.row, L.col)), dtype=torch.long)
-    values = torch.tensor(L.data, dtype=torch.float32)
-    return torch.sparse_coo_tensor(indices, values, L.shape).coalesce()
+    indices = torch.as_tensor(np.vstack((L.row, L.col)), dtype=torch.long)
+    values = torch.as_tensor(L.data, dtype=dtype)
+    return torch.sparse_coo_tensor(indices, values, L.shape, dtype=dtype).coalesce()
 
 
 def _sparse_mm(sparse_matrix, dense_matrix):
-    return torch.sparse.mm(sparse_matrix.to(device=dense_matrix.device, dtype=dense_matrix.dtype), dense_matrix)
+    if sparse_matrix.device != dense_matrix.device or sparse_matrix.dtype != dense_matrix.dtype:
+        sparse_matrix = sparse_matrix.to(device=dense_matrix.device, dtype=dense_matrix.dtype)
+    return torch.sparse.mm(sparse_matrix, dense_matrix)
 
 
 def _init_tensor(shape, initializer, default_stddev):
@@ -89,8 +102,7 @@ class NodeBatchNorm1d(nn.Module):
 class _GraphPolynomial(nn.Module):
     def __init__(self, L, K, Fout=None, initializer=None, activation=None, use_bias=False, use_bn=False, **kwargs):
         super().__init__()
-        _raise_for_unsupported_tf_kwargs(kwargs)
-        self.L = L
+        self.L_shape = tuple(_to_scipy_csr(L).shape)
         self.K = K
         self.Fout = Fout
         self.initializer = initializer
