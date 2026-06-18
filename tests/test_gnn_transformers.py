@@ -51,4 +51,18 @@ def test_Graph_Transformer():
     # second eager call smoke test
     output = graph_ViT(m_in)
 
-    assert output.shape == (3, n_pix, num_heads * key_dim)
+    assert output.numpy().shape == (3, n_pix, num_heads * key_dim)
+
+
+def test_graph_transformer_sparse_indices_buffer_moves_with_model_device():
+    import torch
+    from scipy import sparse
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    A = sparse.csr_matrix(np.eye(4, dtype=np.float32))
+    layer = gnn_transformers.Graph_Transformer(A=A, key_dim=2, num_heads=2, n_layers=1).to(device)
+    assert "sparse_A_indices" in dict(layer.named_buffers())
+    assert layer.sparse_A_indices.device == device
+    assert layer.sparse_A_indices.dtype == torch.long
+    out = layer(torch.randn(2, 4, 3, device=device))
+    assert out.device == device

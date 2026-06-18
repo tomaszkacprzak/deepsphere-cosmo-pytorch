@@ -246,19 +246,38 @@ class HealpyGCNN(nn.Module):
         else:
             raise ValueError("layer should be either string or int.")
 
-        if isinstance(torch_layer, gnn.GCNN_ResidualLayer):
-            if not (isinstance(torch_layer.layer1, gnn.Chebyshev) and isinstance(torch_layer.layer2, gnn.Chebyshev)):
-                raise ValueError(f"The requested layer ({layer}) is of type {type(torch_layer)}, but only Chebyshev or GCNN_ResidualLayer layers (with Chebyshev sublayers) are supported...")
-            weights = [
-                self._get_filter_coeffs(torch_layer.layer1, ind_in=ind_in, ind_out=ind_out),
-                self._get_filter_coeffs(torch_layer.layer2, ind_in=ind_in, ind_out=ind_out),
-            ]
-            n_features = torch_layer.layer1.L.shape[0]
-        elif isinstance(torch_layer, gnn.Chebyshev):
-            weights = [self._get_filter_coeffs(torch_layer, ind_in=ind_in, ind_out=ind_out)]
-            n_features = torch_layer.L.shape[0]
+        # check if the layer is actually the right type
+        if isinstance(tf_layer, gnn.GCNN_ResidualLayer):
+            if not (isinstance(tf_layer.layer1, gnn.Chebyshev) and isinstance(tf_layer.layer2, gnn.Chebyshev)):
+                raise ValueError(
+                    f"The requested layer ({layer}) is of type {type(tf_layer)}, but only "
+                    f"Chebyshev5 or GCNN_ResidualLayer layers (with Chebyshev5 sublayers) "
+                    f"are supported..."
+                )
+        elif not isinstance(tf_layer, gnn.Chebyshev):
+            raise ValueError(
+                f"The requested layer ({layer}) is of type {type(tf_layer)}, but only "
+                f"Chebyshev5 or GCNN_ResidualLayer layers (with Chebyshev5 sublayers) "
+                f"are supported..."
+            )
+
+        # we get the weights
+        if isinstance(tf_layer, gnn.GCNN_ResidualLayer):
+            # get the weights
+            # print(tf_layer.layer1.kernel)
+            weight1 = self._get_filter_coeffs(tf_layer.layer1, ind_in=ind_in, ind_out=ind_out)
+            weight2 = self._get_filter_coeffs(tf_layer.layer2, ind_in=ind_in, ind_out=ind_out)
+            weights = [weight1, weight2]
+
+            # get the size of the features
+            n_features = tf_layer.layer1.L_shape[0]
+
         else:
-            raise ValueError(f"The requested layer ({layer}) is of type {type(torch_layer)}, but only Chebyshev or GCNN_ResidualLayer layers (with Chebyshev sublayers) are supported...")
+            # get the weights and reshape
+            weight1 = self._get_filter_coeffs(tf_layer, ind_in=ind_in, ind_out=ind_out)
+            weights = [weight1]
+            # get the size of the features
+            n_features = tf_layer.L_shape[0]
 
         if return_weights:
             return weights

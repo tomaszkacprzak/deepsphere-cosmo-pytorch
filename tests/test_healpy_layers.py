@@ -130,4 +130,20 @@ def test_Healpy_ResidualLayer():
     res_layer = res_layer._get_layer(np.eye(n_pix, dtype=np.float64))
     out = res_layer(m_in)
 
-    assert out.shape == (3, n_pix, 7)
+    assert out.numpy().shape == (3, n_pix, 7)
+
+
+def test_healpy_smoothing_buffers_move_with_model_device():
+    import torch
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    nside = 1
+    indices = np.arange(hp.nside2npix(nside))
+    layer = healpy_layers.HealpySmoothing(nside=nside, indices=indices, sigma=1.0, arcmin=False).to(device)
+    assert layer.indices.device == device
+    assert layer.indices.dtype == torch.long
+    assert layer.sparse_kernel.device == device
+    assert layer.sparse_kernel.dtype == torch.float32
+    assert layer.sparse_kernel.indices().dtype == torch.long
+    out = layer(torch.randn(2, len(indices), 1, device=device))
+    assert out.device == device
