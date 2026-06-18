@@ -41,6 +41,27 @@ class _HealpyModule(nn.Module):
         return self.forward(*args, **kwargs)
 
 
+def _raise_for_unsupported_tf_kwargs(kwargs):
+    unsupported = sorted(
+        set(kwargs).intersection(
+            {
+                "regularizer",
+                "kernel_regularizer",
+                "bias_regularizer",
+                "activity_regularizer",
+                "kernel_constraint",
+                "bias_constraint",
+            }
+        )
+    )
+    if unsupported:
+        raise TypeError(
+            "TensorFlow/Keras-style arguments are not supported by the PyTorch port: "
+            f"{', '.join(unsupported)}. Use torch.nn modules and PyTorch optimizer/loss "
+            "regularization instead."
+        )
+
+
 class HealpyPool(_HealpyModule):
     """
     A pooling layer for healy maps, makes use of the fact that a pixels is always divided into 4 subpixels when
@@ -58,6 +79,7 @@ class HealpyPool(_HealpyModule):
         """
         # This is necessary for every Layer
         super(HealpyPool, self).__init__()
+        _raise_for_unsupported_tf_kwargs(kwargs)
 
         # check p
         if not p >= 1:
@@ -111,6 +133,7 @@ class HealpyPseudoConv(_HealpyModule):
         """
         # This is necessary for every Layer
         super(HealpyPseudoConv, self).__init__()
+        _raise_for_unsupported_tf_kwargs(kwargs)
 
         # check p
         if not p >= 1:
@@ -180,6 +203,7 @@ class HealpyPseudoConv_Transpose(_HealpyModule):
         """
         # This is necessary for every Layer
         super(HealpyPseudoConv_Transpose, self).__init__()
+        _raise_for_unsupported_tf_kwargs(kwargs)
 
         # check p
         if not p >= 1:
@@ -250,6 +274,7 @@ class HealpyChebyshev:
         :param kwargs: additional keyword arguments passed on to add_weight
         """
         # we only save the variables here
+        _raise_for_unsupported_tf_kwargs(kwargs)
         self.K = K
         self.Fout = Fout
         self.initializer = initializer
@@ -299,6 +324,7 @@ class HealpyMonomial:
         """
 
         # we only save the variables here
+        _raise_for_unsupported_tf_kwargs(kwargs)
         self.K = K
         self.Fout = Fout
         self.initializer = initializer
@@ -362,6 +388,7 @@ class Healpy_ResidualLayer:
         """
 
         # we only save the variables here
+        _raise_for_unsupported_tf_kwargs(layer_kwargs)
         self.layer_type = layer_type
         self.layer_kwargs = layer_kwargs
         self.activation = activation
@@ -451,6 +478,7 @@ class Healpy_Transformer:
         """
 
         # save variables
+        _raise_for_unsupported_tf_kwargs({})
         self.key_dim = key_dim
         self.num_heads = num_heads
         self.positional_encoding = positional_encoding
@@ -493,6 +521,7 @@ class HealpyBernstein:
         :param kwargs: additional keyword arguments passed on to add_weight
         """
         # we only save the variables here
+        _raise_for_unsupported_tf_kwargs(kwargs)
         self.K = K
         self.Fout = Fout
         self.initializer = initializer
@@ -587,9 +616,12 @@ class HealpySmoothing(_HealpyModule):
 
         # pixels
         self.nside = nside
-        self.indices = indices
         self.nest = nest
-        self.mask = mask
+        self.register_buffer("indices", torch.as_tensor(indices, dtype=torch.long))
+        if mask is None:
+            self.register_buffer("mask", torch.empty(0), persistent=False)
+        else:
+            self.register_buffer("mask", torch.as_tensor(mask, dtype=torch.get_default_dtype()), persistent=False)
 
         # smoothing
         assert fwhm is not None or sigma is not None, f"One of fwhm and sigma has to be specified"
@@ -600,11 +632,12 @@ class HealpySmoothing(_HealpyModule):
         self.n_sigma_support = n_sigma_support
         self.arcmin = arcmin
         self.per_channel_repetitions = per_channel_repetitions
+        self.register_buffer("per_channel_repetitions_buffer", torch.empty(0, dtype=torch.long), persistent=False)
         self.white_noise_sigma = white_noise_sigma
         self.data_path = data_path
         self.max_batch_size = max_batch_size
         self.register_buffer("mask_buffer", torch.empty(0), persistent=False)
-        self.register_buffer("sparse_kernel", torch.empty(0).to_sparse_coo())
+        self.register_buffer("sparse_kernel", torch.empty(0, dtype=torch.float32).to_sparse_coo())
 
         if self.fwhm == 0.0 or self.sigma == 0.0:
             self.do_smoothing = False
@@ -624,6 +657,7 @@ class HealpySmoothing(_HealpyModule):
 
                 # ceil to be conservative, square because Gaussian variances are added (not stds)
                 self.per_channel_repetitions = np.ceil((self.fwhm / fwhm_min) ** 2).astype(int)
+                self.per_channel_repetitions_buffer = torch.as_tensor(self.per_channel_repetitions, dtype=torch.long)
                 self.fwhm = fwhm_min
 
             elif isinstance(self.sigma, (list, np.ndarray)):
@@ -634,10 +668,12 @@ class HealpySmoothing(_HealpyModule):
                 self.sigma = np.array(self.sigma)
                 sigma_min = np.min(self.sigma)
                 self.per_channel_repetitions = np.ceil((self.sigma / sigma_min) ** 2).astype(int)
+                self.per_channel_repetitions_buffer = torch.as_tensor(self.per_channel_repetitions, dtype=torch.long)
                 self.sigma = sigma_min
 
-            elif isinstance(self.per_channel_repetitions, list):
+            elif isinstance(self.per_channel_repetitions, (list, np.ndarray)):
                 self.per_channel_repetitions = np.array(self.per_channel_repetitions)
+                self.per_channel_repetitions_buffer = torch.as_tensor(self.per_channel_repetitions, dtype=torch.long)
 
             # internally, the smoothing is always done with sigma
             if self.sigma is None:
@@ -724,8 +760,8 @@ class HealpySmoothing(_HealpyModule):
                 self.per_channel_repetitions.dtype == int
             ), "The list per_channel_repetitions has to contain integers only"
 
-        if self.mask is not None:
-            mask = torch.as_tensor(self.mask, dtype=torch.get_default_dtype())
+        if self.mask.numel() > 0:
+            mask = self.mask.to(dtype=torch.get_default_dtype())
             if mask.ndim == 1:
                 mask = mask[None, :, None]
             elif mask.ndim == 2:
@@ -746,11 +782,13 @@ class HealpySmoothing(_HealpyModule):
         if not hasattr(self, "n_channels"):
             self.build(tuple(inputs.shape))
 
-        sparse_kernel = self.sparse_kernel.to(device=inputs.device, dtype=inputs.dtype)
+        sparse_kernel = self.sparse_kernel
+        if sparse_kernel.device != inputs.device or sparse_kernel.dtype != inputs.dtype:
+            sparse_kernel = sparse_kernel.to(device=inputs.device, dtype=inputs.dtype)
         indices_first = inputs.permute(1, 0, 2)
         stack = []
         for i, single_channel in enumerate(torch.unbind(indices_first, dim=2)):
-            repetitions = int(self.per_channel_repetitions[i]) if self.per_channel_repetitions is not None else 1
+            repetitions = int(self.per_channel_repetitions_buffer[i]) if self.per_channel_repetitions_buffer.numel() > 0 else 1
             for _ in range(repetitions):
                 single_channel = torch.sparse.mm(sparse_kernel, single_channel)
             stack.append(single_channel)
@@ -777,7 +815,7 @@ class HealpySmoothing(_HealpyModule):
             f"{self.sigma_arcmin * self.n_sigma_support:4.2f} arcmin"
         )
 
-        lon, lat = hp.pix2ang(self.nside, ipix=self.indices, nest=self.nest, lonlat=True)
+        lon, lat = hp.pix2ang(self.nside, ipix=self.indices.cpu().numpy(), nest=self.nest, lonlat=True)
         theta = np.stack([np.radians(lat), np.radians(lon)], axis=1)
 
         tree = BallTree(theta, metric="haversine")
@@ -820,7 +858,7 @@ class HealpySmoothing(_HealpyModule):
     def _build_sparse_tensor(self) -> None:
         """Build and register the normalized torch sparse COO kernel."""
         indices = torch.as_tensor(np.asarray(self.ind_coo).T, dtype=torch.long)
-        values = torch.as_tensor(np.asarray(self.val_coo), dtype=torch.get_default_dtype())
+        values = torch.as_tensor(np.asarray(self.val_coo), dtype=torch.float32)
         sparse_kernel = torch.sparse_coo_tensor(indices, values, (self.n_indices, self.n_indices)).coalesce()
         row_sum = torch.sparse.sum(sparse_kernel, dim=1).to_dense().clamp_min(torch.finfo(values.dtype).eps)
         row_indices = sparse_kernel.indices()[0]

@@ -9,6 +9,27 @@ from torch.nn import functional as F
 from . import utils
 
 
+_UNSUPPORTED_TF_KWARGS = {
+    "regularizer",
+    "kernel_regularizer",
+    "bias_regularizer",
+    "activity_regularizer",
+    "kernel_constraint",
+    "bias_constraint",
+}
+
+
+def _raise_for_unsupported_tf_kwargs(kwargs):
+    unsupported = sorted(set(kwargs).intersection(_UNSUPPORTED_TF_KWARGS))
+    if unsupported:
+        raise TypeError(
+            "TensorFlow/Keras-style arguments are not supported by the PyTorch port: "
+            f"{', '.join(unsupported)}. Use native PyTorch modules and apply regularization "
+            "in the training loop/optimizer (for example optimizer weight_decay) or by "
+            "adding explicit penalty terms to the loss."
+        )
+
+
 def _activation(activation):
     if activation is None:
         return None
@@ -20,17 +41,30 @@ def _activation(activation):
     raise ValueError(f"Could not find activation <{activation}> in supported torch activations...")
 
 
-def _to_sparse_tensor(L, scale=1.0):
-    L = sparse.csr_matrix(L)
+def _to_scipy_csr(matrix):
+    if sparse.issparse(matrix):
+        return matrix.tocsr()
+    if torch.is_tensor(matrix):
+        matrix = matrix.detach().cpu().numpy()
+    elif hasattr(matrix, "numpy"):
+        matrix = matrix.numpy()
+    return sparse.csr_matrix(matrix)
+
+
+def _to_sparse_tensor(L, scale=1.0, dtype=torch.float32):
+    """Convert a SciPy/NumPy sparse Laplacian to a coalesced torch sparse COO tensor."""
+    L = _to_scipy_csr(L)
     lmax = 1.02 * eigsh(L, k=1, which="LM", return_eigenvectors=False)[0]
     L = utils.rescale_L(L, lmax=lmax, scale=scale).tocoo()
-    indices = torch.tensor(np.vstack((L.row, L.col)), dtype=torch.long)
-    values = torch.tensor(L.data, dtype=torch.float32)
-    return torch.sparse_coo_tensor(indices, values, L.shape).coalesce()
+    indices = torch.as_tensor(np.vstack((L.row, L.col)), dtype=torch.long)
+    values = torch.as_tensor(L.data, dtype=dtype)
+    return torch.sparse_coo_tensor(indices, values, L.shape, dtype=dtype).coalesce()
 
 
 def _sparse_mm(sparse_matrix, dense_matrix):
-    return torch.sparse.mm(sparse_matrix.to(device=dense_matrix.device, dtype=dense_matrix.dtype), dense_matrix)
+    if sparse_matrix.device != dense_matrix.device or sparse_matrix.dtype != dense_matrix.dtype:
+        sparse_matrix = sparse_matrix.to(device=dense_matrix.device, dtype=dense_matrix.dtype)
+    return torch.sparse.mm(sparse_matrix, dense_matrix)
 
 
 def _init_tensor(shape, initializer, default_stddev):
@@ -68,7 +102,7 @@ class NodeBatchNorm1d(nn.Module):
 class _GraphPolynomial(nn.Module):
     def __init__(self, L, K, Fout=None, initializer=None, activation=None, use_bias=False, use_bn=False, **kwargs):
         super().__init__()
-        self.L = L
+        self.L_shape = tuple(_to_scipy_csr(L).shape)
         self.K = K
         self.Fout = Fout
         self.initializer = initializer
@@ -203,7 +237,7 @@ class GCNN_ResidualLayer(nn.Module):
         self.use_bn = use_bn
         self.alpha = alpha
         layer_kwargs = dict(layer_kwargs)
-        layer_kwargs.pop("regularizer", None)
+        _raise_for_unsupported_tf_kwargs(layer_kwargs)
         if layer_type == "CHEBY":
             self.layer1 = Chebyshev(**layer_kwargs)
             self.layer2 = Chebyshev(**layer_kwargs)

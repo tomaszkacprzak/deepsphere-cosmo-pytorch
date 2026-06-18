@@ -18,6 +18,16 @@ def _as_tensor(inputs):
     return torch.as_tensor(inputs, dtype=torch.get_default_dtype())
 
 
+def _to_scipy_coo(matrix):
+    if sparse.issparse(matrix):
+        return matrix.tocoo()
+    if torch.is_tensor(matrix):
+        matrix = matrix.detach().cpu().numpy()
+    elif hasattr(matrix, "numpy"):
+        matrix = matrix.numpy()
+    return sparse.csr_matrix(matrix).tocoo()
+
+
 def _activation_module(activation):
     if activation is None or activation == "linear":
         return nn.Identity()
@@ -271,7 +281,7 @@ class Graph_Transformer(nn.Module):
 
     def __init__(self, A, key_dim, num_heads, positional_encoding=True, n_layers=1, activation="relu", layer_norm=True):
         super().__init__()
-        self.A = A
+        self.A_shape = tuple(_to_scipy_coo(A).shape)
         self.key_dim = key_dim
         self.num_heads = num_heads
         self.embedding_size = self.key_dim * self.num_heads
@@ -280,7 +290,8 @@ class Graph_Transformer(nn.Module):
         self.activation = activation
         self.layer_norm = layer_norm
 
-        sparse_A_indices = np.array(sparse.csc_matrix.nonzero(self.A)).T
+        sparse_A = _to_scipy_coo(A)
+        sparse_A_indices = np.stack([sparse_A.row, sparse_A.col], axis=1)
         self.register_buffer("sparse_A_indices", torch.as_tensor(sparse_A_indices, dtype=torch.long))
 
         self.embed = nn.LazyLinear(self.embedding_size)
