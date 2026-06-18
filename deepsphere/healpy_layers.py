@@ -10,6 +10,8 @@ from sklearn.neighbors import BallTree
 from typing import Union, Optional
 from tqdm import tqdm
 
+from .utils import channels_nodes_to_nodes_channels, nodes_channels_to_channels_nodes
+
 
 def _as_torch_tensor(x, *, device=None, dtype=None):
     if isinstance(x, torch.Tensor):
@@ -88,7 +90,7 @@ class HealpyPool(_HealpyModule):
         """Apply pooling to a (batch, nodes, channels) tensor."""
 
         input_tensor = _as_torch_tensor(input_tensor)
-        return self.filter(input_tensor.permute(0, 2, 1)).permute(0, 2, 1)
+        return channels_nodes_to_nodes_channels(self.filter(nodes_channels_to_channels_nodes(input_tensor)))
 
 
 class HealpyPseudoConv(_HealpyModule):
@@ -157,7 +159,7 @@ class HealpyPseudoConv(_HealpyModule):
 
         input_tensor = _as_torch_tensor(input_tensor)
         self._build_filter(input_tensor.shape[2], input_tensor.device, input_tensor.dtype)
-        return self.filter(input_tensor.permute(0, 2, 1)).permute(0, 2, 1)
+        return channels_nodes_to_nodes_channels(self.filter(nodes_channels_to_channels_nodes(input_tensor)))
 
 
 class HealpyPseudoConv_Transpose(_HealpyModule):
@@ -228,7 +230,7 @@ class HealpyPseudoConv_Transpose(_HealpyModule):
 
         input_tensor = _as_torch_tensor(input_tensor)
         self._build_filter(input_tensor.shape[2], input_tensor.device, input_tensor.dtype)
-        return self.filter(input_tensor.permute(0, 2, 1)).permute(0, 2, 1)
+        return channels_nodes_to_nodes_channels(self.filter(nodes_channels_to_channels_nodes(input_tensor)))
 
 
 class HealpyChebyshev:

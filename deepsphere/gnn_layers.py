@@ -62,7 +62,7 @@ class NodeBatchNorm1d(nn.Module):
         self.bn = nn.BatchNorm1d(num_features, eps=eps, momentum=momentum, affine=affine)
 
     def forward(self, x):
-        return self.bn(x.permute(0, 2, 1)).permute(0, 2, 1)
+        return utils.channels_nodes_to_nodes_channels(self.bn(utils.nodes_channels_to_channels_nodes(x)))
 
 
 class _GraphPolynomial(nn.Module):

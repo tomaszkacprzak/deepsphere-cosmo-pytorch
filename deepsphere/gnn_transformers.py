@@ -5,6 +5,7 @@ import torch
 from scipy import sparse
 from torch import nn
 
+from .utils import channels_nodes_to_nodes_channels, nodes_channels_to_channels_nodes
 
 # Helper Functions
 ##################
@@ -23,9 +24,11 @@ def _activation_module(activation):
     if isinstance(activation, nn.Module):
         return activation
     if callable(activation) and not isinstance(activation, str):
+
         class _CallableActivation(nn.Module):
             def forward(self, x):
                 return activation(x)
+
         return _CallableActivation()
     name = str(activation).lower()
     if name == "relu":
@@ -253,7 +256,7 @@ class Graph_ViT(nn.Module):
             raise IOError(
                 f"Input shape {tuple(inputs.shape)} not compatible with the embedding filter size {self.embed_filter_size}"
             )
-        x = self.embed(inputs.permute(0, 2, 1)).permute(0, 2, 1)
+        x = channels_nodes_to_nodes_channels(self.embed(nodes_channels_to_channels_nodes(inputs)))
         if self.pos_encoder is not None:
             x = self.pos_encoder(x)
         for mha in self.mha_layers:

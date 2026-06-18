@@ -83,6 +83,20 @@ class SphericalClassifier(nn.Module):
 
 The notebooks below are kept as historical references until their full examples are ported to PyTorch.
 
+## Tensor layout
+
+The PyTorch port preserves the public DeepSphere tensor layout
+`(batch, nodes, channels)` for API compatibility with the historical
+DeepSphere TensorFlow implementations. Public layers should accept and return
+that layout.
+
+Internally, the implementation transposes only at the boundary of PyTorch
+layers that require channel-first tensors, such as `torch.nn.Conv1d`,
+`torch.nn.MaxPool1d`, and `torch.nn.AvgPool1d`. Use the internal layout helpers
+`deepsphere.utils.nodes_channels_to_channels_nodes(x)` and
+`deepsphere.utils.channels_nodes_to_nodes_channels(x)` for these boundaries
+instead of adding ad hoc `permute(0, 2, 1)` calls.
+
 ## Legacy installation notes
 
 Older TensorFlow-specific setup instructions have been removed from this PyTorch README. If you need the TensorFlow version, see the historical `deepsphere-cosmo-tf2` repository.
