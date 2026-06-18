@@ -53,10 +53,10 @@ def test_chebyshev_depthwise_shape():
 def test_monomial_known_numpy_fixture_with_identity_laplacian():
     x = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]])
     layer = gnn_layers.Monomial(L=np.eye(2), K=2, Fout=1, initializer=_constant_initializer(1.0), activation="linear")
-    out = layer(x).detach().numpy()
+    out = layer(x).detach().cpu().numpy()
 
-    L = layer.sparse_L.to_dense().numpy()
-    x0 = x.numpy()[0]
+    L = layer.sparse_L.to_dense().detach().cpu().numpy()
+    x0 = x.detach().cpu().numpy()[0]
     expected_basis = np.concatenate([x0, L @ x0], axis=1)
     expected = expected_basis.sum(axis=1, keepdims=True)[None, :, :]
     np.testing.assert_allclose(out, expected, rtol=1e-6, atol=1e-6)
@@ -65,7 +65,7 @@ def test_monomial_known_numpy_fixture_with_identity_laplacian():
 def test_activations_known_values():
     assert torch.equal(gnn_layers._activation("linear")(torch.tensor([-1.0, 1.0])), torch.tensor([-1.0, 1.0]))
     assert torch.equal(gnn_layers._activation("relu")(torch.tensor([-1.0, 1.0])), torch.tensor([0.0, 1.0]))
-    np.testing.assert_allclose(gnn_layers._activation("elu")(torch.tensor([-1.0])).numpy(), np.array([-0.63212055]))
+    np.testing.assert_allclose(gnn_layers._activation("elu")(torch.tensor([-1.0])).detach().cpu().numpy(), np.array([-0.63212055]))
     with pytest.raises(ValueError):
         gnn_layers._activation("gelu")
 
@@ -80,12 +80,12 @@ def test_GCNN_ResidualLayer():
 
     layer_kwargs = {"L": np.eye(n_pix, dtype=np.float64), "K": 5, "activation": "relu"}
     res_layer = gnn_layers.GCNN_ResidualLayer(layer_type="CHEBY", layer_kwargs=layer_kwargs, activation="relu")
-    assert res_layer(m_in).detach().numpy().shape == (3, n_pix, 7)
+    assert res_layer(m_in).detach().cpu().numpy().shape == (3, n_pix, 7)
 
     res_layer = gnn_layers.GCNN_ResidualLayer(
         layer_type="CHEBY", layer_kwargs=layer_kwargs, activation="relu", use_bn=True
     )
-    assert res_layer(m_in).detach().numpy().shape == (3, n_pix, 7)
+    assert res_layer(m_in).detach().cpu().numpy().shape == (3, n_pix, 7)
 
     res_layer = gnn_layers.GCNN_ResidualLayer(
         layer_type="CHEBY",
@@ -95,7 +95,7 @@ def test_GCNN_ResidualLayer():
         norm_type="layer_norm",
         bn_kwargs={"axis": (1, 2)},
     )
-    assert res_layer(m_in).detach().numpy().shape == (3, n_pix, 7)
+    assert res_layer(m_in).detach().cpu().numpy().shape == (3, n_pix, 7)
 
     with pytest.raises(ValueError):
         gnn_layers.GCNN_ResidualLayer(
