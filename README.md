@@ -75,6 +75,19 @@ class SphericalClassifier(nn.Module):
         return self.classifier(x)
 ```
 
+
+A fuller map-only regression translation of the historical TensorFlow/Keras
+``HealpyGCNN`` snippet is available as a runnable script:
+
+```sh
+python examples/map_only_regression.py
+```
+
+That example uses PyTorch tensors and modules (`torch.zeros`,
+`torch.nn.LayerNorm`, and `torch.nn.LazyLinear`), passes `indices=` to
+`HealpyGCNN`/`HealpySmoothing`, and extends sparse HEALPix footprints before
+downsampling so the model satisfies the package's NEST footprint validation.
+
 The notebooks below are kept as historical references until their full examples are ported to PyTorch.
 
 ## Tensor layout

@@ -1,4 +1,5 @@
 from .gnn_layers import *
+from .gnn_layers import _activation
 from .gnn_transformers import *
 
 import os
@@ -121,7 +122,7 @@ class HealpyPseudoConv(_HealpyModule):
     averaging the pixels into bigger pixels using learnable weights
     """
 
-    def __init__(self, p, Fout, kernel_initializer=None, **kwargs):
+    def __init__(self, p, Fout, kernel_initializer=None, activation=None, **kwargs):
         """
         initializes the layer
         :param p: reduction factor >=1 of the nside -> number of nodes reduces by 4^p, note that the layer only checks
@@ -129,6 +130,7 @@ class HealpyPseudoConv(_HealpyModule):
                   (should be nested ordering)
         :param Fout: number of output channels
         :param kernel_initializer: initializer for kernel init
+        :param activation: activation function applied after the pseudo-convolution, defaults to linear
         :param kwargs: additional keyword arguments passed to the PyTorch 1D conv layer
         """
         # This is necessary for every Layer
@@ -144,6 +146,7 @@ class HealpyPseudoConv(_HealpyModule):
         self.filter_size = int(4**p)
         self.Fout = Fout
         self.kernel_initializer = kernel_initializer
+        self.activation = _activation(activation)
         self.kwargs = kwargs
 
         self.filter = None
@@ -182,7 +185,10 @@ class HealpyPseudoConv(_HealpyModule):
 
         input_tensor = _as_torch_tensor(input_tensor)
         self._build_filter(input_tensor.shape[2], input_tensor.device, input_tensor.dtype)
-        return channels_nodes_to_nodes_channels(self.filter(nodes_channels_to_channels_nodes(input_tensor)))
+        output = channels_nodes_to_nodes_channels(self.filter(nodes_channels_to_channels_nodes(input_tensor)))
+        if self.activation is not None:
+            output = self.activation(output)
+        return output
 
 
 class HealpyPseudoConv_Transpose(_HealpyModule):
