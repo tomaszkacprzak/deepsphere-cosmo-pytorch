@@ -65,7 +65,9 @@ def test_monomial_known_numpy_fixture_with_identity_laplacian():
 def test_activations_known_values():
     assert torch.equal(gnn_layers._activation("linear")(torch.tensor([-1.0, 1.0])), torch.tensor([-1.0, 1.0]))
     assert torch.equal(gnn_layers._activation("relu")(torch.tensor([-1.0, 1.0])), torch.tensor([0.0, 1.0]))
-    np.testing.assert_allclose(gnn_layers._activation("elu")(torch.tensor([-1.0])).detach().cpu().numpy(), np.array([-0.63212055]))
+    np.testing.assert_allclose(
+        gnn_layers._activation("elu")(torch.tensor([-1.0])).detach().cpu().numpy(), np.array([-0.63212055])
+    )
     with pytest.raises(ValueError):
         gnn_layers._activation("gelu")
 
@@ -113,3 +115,34 @@ def test_sparse_laplacian_buffer_moves_with_model_device():
     x = torch.randn(2, 3, 4, device=device)
     out = layer(x)
     assert out.device == device
+
+
+def test_lazy_graph_and_residual_parameters_follow_input_device_and_dtype():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype = torch.float64
+    x = torch.randn(2, 3, 4, device=device, dtype=dtype)
+
+    layer = gnn_layers.Chebyshev(L=_sym_laplacian(), K=2, Fout=5, use_bias=True, use_bn=True).to(
+        device=device, dtype=dtype
+    )
+    out = layer(x)
+    assert out.device == device
+    assert out.dtype == dtype
+    assert layer.kernel.device == device
+    assert layer.kernel.dtype == dtype
+    assert layer.bias.device == device
+    assert layer.bias.dtype == dtype
+
+    res_layer = gnn_layers.GCNN_ResidualLayer(
+        layer_type="CHEBY",
+        layer_kwargs={"L": _sym_laplacian(), "K": 2},
+        use_bn=True,
+        norm_type="layer_norm",
+    ).to(device=device, dtype=dtype)
+    res_out = res_layer(x)
+    assert res_out.device == device
+    assert res_out.dtype == dtype
+    assert res_layer.bn1.weight.device == device
+    assert res_layer.bn1.weight.dtype == dtype
+    assert res_layer.bn2.weight.device == device
+    assert res_layer.bn2.weight.dtype == dtype
