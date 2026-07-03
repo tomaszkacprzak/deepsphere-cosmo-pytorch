@@ -184,7 +184,8 @@ class HealpyPseudoConv(_HealpyModule):
         """Apply pseudo-convolution to a (batch, nodes, channels) tensor."""
 
         input_tensor = _as_torch_tensor(input_tensor)
-        self._build_filter(input_tensor.shape[2], input_tensor.device, input_tensor.dtype)
+        if self.filter is None:
+            self._build_filter(input_tensor.shape[2], input_tensor.device, input_tensor.dtype)
         output = channels_nodes_to_nodes_channels(self.filter(nodes_channels_to_channels_nodes(input_tensor)))
         if self.activation is not None:
             output = self.activation(output)
@@ -259,7 +260,8 @@ class HealpyPseudoConv_Transpose(_HealpyModule):
         """Apply pseudo-transpose-convolution to a (batch, nodes, channels) tensor."""
 
         input_tensor = _as_torch_tensor(input_tensor)
-        self._build_filter(input_tensor.shape[2], input_tensor.device, input_tensor.dtype)
+        if self.filter is None:
+            self._build_filter(input_tensor.shape[2], input_tensor.device, input_tensor.dtype)
         return channels_nodes_to_nodes_channels(self.filter(nodes_channels_to_channels_nodes(input_tensor)))
 
 
@@ -492,7 +494,7 @@ class Healpy_Transformer:
         self.activation = activation
         self.layer_norm = layer_norm
 
-    def _get_layer(self, A):
+    def _get_layer(self, A, Fin):
         """
         initializes the actual layer, should be called once the graph adjacency matrix has been calculated
         :param A: the graph Adjacency matrix
@@ -501,6 +503,7 @@ class Healpy_Transformer:
 
         return Graph_Transformer(
             A=A,
+            Fin=Fin,
             key_dim=self.key_dim,
             num_heads=self.num_heads,
             positional_encoding=self.positional_encoding,
@@ -794,7 +797,9 @@ class HealpySmoothing(_HealpyModule):
         indices_first = inputs.permute(1, 0, 2)
         stack = []
         for i, single_channel in enumerate(torch.unbind(indices_first, dim=2)):
-            repetitions = int(self.per_channel_repetitions_buffer[i]) if self.per_channel_repetitions_buffer.numel() > 0 else 1
+            repetitions = (
+                int(self.per_channel_repetitions_buffer[i]) if self.per_channel_repetitions_buffer.numel() > 0 else 1
+            )
             for _ in range(repetitions):
                 single_channel = torch.sparse.mm(sparse_kernel, single_channel)
             stack.append(single_channel)

@@ -14,19 +14,6 @@ from deepsphere import HealpyGCNN, healpy_layers
 from deepsphere.utils import extend_indices
 
 
-class LazyLayerNorm(nn.Module):
-    """LayerNorm whose normalized shape is inferred on the first forward pass."""
-
-    def __init__(self):
-        super().__init__()
-        self.norm = None
-
-    def forward(self, x):
-        if self.norm is None:
-            self.norm = nn.LayerNorm(x.shape[1:]).to(device=x.device, dtype=x.dtype)
-        return self.norm(x)
-
-
 def build_map_only_regressor(
     n_side,
     indices,
@@ -89,10 +76,12 @@ def build_map_only_regressor(
         )
 
     # Dense regression head: Flatten -> LayerNorm -> Dense(out_features).
-    # Lazy modules infer the flattened feature count on the first forward pass.
+    # The flattened feature count is computed up front.
+    n_nodes_out = len(indices) // (4 ** (downsampling_layers + cheby_layers))
+    flattened_features = n_nodes_out * n_filters
     layers.append(nn.Flatten())
-    layers.append(LazyLayerNorm())
-    layers.append(nn.LazyLinear(out_features))
+    layers.append(nn.LayerNorm(flattened_features))
+    layers.append(nn.Linear(flattened_features, out_features))
 
     model = HealpyGCNN(
         nside=n_side,

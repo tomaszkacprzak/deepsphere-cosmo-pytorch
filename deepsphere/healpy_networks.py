@@ -6,8 +6,7 @@ Save and restore weights with the standard PyTorch API::
 
     torch.save(model.state_dict(), "healpy_gcnn.pt")
 
-    restored = HealpyGCNN(nside=nside, indices=indices, layers=layers)
-    restored.initialize((batch_size, n_pixels, n_features))  # one-time init for lazy layers
+    restored = HealpyGCNN(nside=nside, indices=indices, layers=layers, initial_Fin=n_features)
     restored.load_state_dict(torch.load("healpy_gcnn.pt", map_location="cpu"))
 
 For detailed model summaries, install ``torchinfo`` and call::
@@ -37,9 +36,8 @@ class HealpyGCNN(nn.Module):
 
     The public class name and constructor signature are preserved from the
     previous implementation. ``build(input_shape=...)`` is kept as a
-    shape-validation/eager-initialization compatibility hook; normal PyTorch
-    use can rely on eager construction and lazy initialization on the first
-    ``forward`` pass.
+    shape-validation compatibility hook; normal PyTorch use gets fully
+    initialized modules from the constructor when ``initial_Fin`` is provided.
     """
 
     def __init__(self, nside, indices, layers, n_neighbors=8, max_batch_size=None, initial_Fin=None):
@@ -114,6 +112,11 @@ class HealpyGCNN(nn.Module):
         current_nside = self.nside_in
         current_indices = indices
         current_Fin = initial_Fin
+        current_shape = (
+            (max_batch_size if max_batch_size is not None else 1, len(current_indices), current_Fin)
+            if current_Fin is not None
+            else None
+        )
 
         for layer in self.layers_in:
             if isinstance(
@@ -134,7 +137,7 @@ class HealpyGCNN(nn.Module):
                     lap_type="normalized",
                 )
                 if isinstance(layer, hp_nn.Healpy_Transformer):
-                    actual_layer = layer._get_layer(sphere.A)
+                    actual_layer = layer._get_layer(sphere.A, current_Fin)
                 else:
                     if (max_batch_size is not None) and (current_Fin is not None):
                         n_edges = len(sphere.L.indices) if hasattr(sphere.L, "indices") else sphere.L.nnz
@@ -144,13 +147,19 @@ class HealpyGCNN(nn.Module):
                         actual_layer = layer._get_layer(sphere.L, n_matmul_splits)
                     else:
                         actual_layer = layer._get_layer(sphere.L)
+                if current_shape is not None and hasattr(actual_layer, "build"):
+                    actual_layer.build(current_shape)
                 layers_use.append(actual_layer)
             elif isinstance(layer, (hp_nn.HealpyPool, hp_nn.HealpyPseudoConv, hp_nn.Healpy_ViT)):
+                if current_shape is not None and hasattr(layer, "build"):
+                    layer.build(current_shape)
                 new_nside = int(current_nside // 2**layer.p)
                 current_indices = self._transform_indices(current_nside, new_nside, current_indices)
                 current_nside = new_nside
                 layers_use.append(layer)
             elif isinstance(layer, hp_nn.HealpyPseudoConv_Transpose):
+                if current_shape is not None and hasattr(layer, "build"):
+                    layer.build(current_shape)
                 new_nside = int(current_nside * 2**layer.p)
                 current_indices = self._transform_indices(current_nside, new_nside, current_indices)
                 current_nside = new_nside
@@ -162,8 +171,14 @@ class HealpyGCNN(nn.Module):
 
             if hasattr(layer, "Fout"):
                 current_Fin = layer.Fout
+            current_shape = (
+                (max_batch_size if max_batch_size is not None else 1, len(current_indices), current_Fin)
+                if current_Fin is not None
+                else None
+            )
 
         self.layers_use = nn.ModuleList(layers_use)
+        self._initialized = True
 
     def save_weights(self, *args, **kwargs):
         raise RuntimeError(
@@ -190,11 +205,10 @@ class HealpyGCNN(nn.Module):
     call = forward
 
     def initialize(self, input_shape, device=None, dtype=None):
-        """Materialize lazy parameters with a one-time dummy forward pass.
+        """Validate the model with a one-time dummy forward pass.
 
-        This supports ``build(input_shape=...)`` expectations. Provide a
-        full ``(batch, nodes, channels)`` input shape before creating an
-        optimizer or before loading a saved ``state_dict`` into a fresh model.
+        Parameters are created in the constructor; this method is retained as a
+        compatibility hook for callers that still use ``build(input_shape=...)``.
         """
         if device is None:
             try:
@@ -222,7 +236,7 @@ class HealpyGCNN(nn.Module):
         return self
 
     def build(self, input_shape=None, **kwargs):
-        """Materialize lazy parameters using a full ``(batch, nodes, channels)`` input shape."""
+        """Validate the model using a full ``(batch, nodes, channels)`` input shape."""
         if input_shape is None:
             input_shape = kwargs.get("input_shape")
         if input_shape is None:
@@ -273,7 +287,7 @@ class HealpyGCNN(nn.Module):
         K, Fout = layer.K, layer.Fout
         if layer.kernel is None:
             raise RuntimeError(
-                "Layer parameters are not initialized. Run a forward pass or initialize(input_shape) first."
+                "Layer parameters are not initialized. Provide initial_Fin to HealpyGCNN before requesting filters."
             )
         trained_weights = layer.kernel.detach().cpu().numpy()
         if Fout is None:

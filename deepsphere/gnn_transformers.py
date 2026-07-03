@@ -231,14 +231,13 @@ class Graph_ViT(nn.Module):
         self.key_dim = key_dim
         self.num_heads = num_heads
         self.embedding_size = self.key_dim * self.num_heads
+        self.Fout = self.embedding_size
         self.positional_encoding = positional_encoding
         self.n_layers = n_layers
         self.activation = activation
         self.layer_norm = layer_norm
 
-        self.embed = nn.LazyConv1d(
-            self.embedding_size, kernel_size=self.embed_filter_size, stride=self.embed_filter_size, padding=0
-        )
+        self.embed = None
         self.pos_encoder = AddPositionEmbs() if self.positional_encoding else None
         assert n_layers >= 1, "Number of attention layers should be at least 1"
         self.mha_layers = nn.ModuleList(
@@ -259,10 +258,22 @@ class Graph_ViT(nn.Module):
             raise IOError(
                 f"Input shape {input_shape} not compatible with the embedding filter size {self.embed_filter_size}"
             )
+        if self.embed is None:
+            self.embed = nn.Conv1d(
+                int(input_shape[-1]),
+                self.embedding_size,
+                kernel_size=self.embed_filter_size,
+                stride=self.embed_filter_size,
+                padding=0,
+            )
+        return self
 
     def forward(self, inputs):
         input_is_tensor = torch.is_tensor(inputs)
         inputs = _as_tensor(inputs)
+        if self.embed is None:
+            self.build(inputs.shape)
+            self.embed.to(device=inputs.device, dtype=inputs.dtype)
         if inputs.shape[1] % self.embed_filter_size != 0:
             raise IOError(
                 f"Input shape {tuple(inputs.shape)} not compatible with the embedding filter size {self.embed_filter_size}"
@@ -280,9 +291,20 @@ class Graph_ViT(nn.Module):
 class Graph_Transformer(nn.Module):
     """A graph transformer layer that takes edge information from an adjacency matrix."""
 
-    def __init__(self, A, key_dim, num_heads, positional_encoding=True, n_layers=1, activation="relu", layer_norm=True):
+    def __init__(
+        self,
+        A,
+        key_dim,
+        num_heads,
+        positional_encoding=True,
+        n_layers=1,
+        activation="relu",
+        layer_norm=True,
+        Fin=None,
+    ):
         super().__init__()
         self.A_shape = tuple(_to_scipy_coo(A).shape)
+        self.Fin = Fin
         self.key_dim = key_dim
         self.num_heads = num_heads
         self.embedding_size = self.key_dim * self.num_heads
@@ -295,7 +317,7 @@ class Graph_Transformer(nn.Module):
         sparse_A_indices = np.stack([sparse_A.row, sparse_A.col], axis=1)
         self.register_buffer("sparse_A_indices", torch.as_tensor(sparse_A_indices, dtype=torch.long))
 
-        self.embed = nn.LazyLinear(self.embedding_size)
+        self.embed = nn.Linear(self.Fin, self.embedding_size) if self.Fin is not None else None
         self.pos_encoder = AddPositionEmbs() if self.positional_encoding else None
         assert n_layers >= 1, "Number of attention layers should be at least 1"
         self.mha_layers = nn.ModuleList(
@@ -316,7 +338,11 @@ class Graph_Transformer(nn.Module):
 
     def forward(self, inputs):
         input_is_tensor = torch.is_tensor(inputs)
-        x = self.embed(_as_tensor(inputs))
+        inputs = _as_tensor(inputs)
+        if self.embed is None:
+            self.Fin = inputs.shape[-1]
+            self.embed = nn.Linear(self.Fin, self.embedding_size).to(device=inputs.device, dtype=inputs.dtype)
+        x = self.embed(inputs)
         if self.pos_encoder is not None:
             x = self.pos_encoder(x)
         for mha in self.mha_layers:
