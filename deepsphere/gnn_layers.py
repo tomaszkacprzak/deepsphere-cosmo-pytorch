@@ -114,6 +114,8 @@ class _GraphPolynomial(nn.Module):
         self.bn = None
 
     def _build(self, Fin, Fout, kernel_shape, default_stddev, device=None, dtype=None):
+        if self.kernel is not None:
+            return
         dtype = dtype or torch.get_default_dtype()
         self.kernel = nn.Parameter(
             _init_tensor(kernel_shape, self.initializer, default_stddev, device=device, dtype=dtype)
@@ -157,6 +159,16 @@ class Chebyshev(_GraphPolynomial):
         self.depth_wise = depth_wise
         self.register_buffer("sparse_L", _to_sparse_tensor(L, scale=0.75))
 
+    def build(self, input_shape, device=None, dtype=None):
+        Fin = int(input_shape[-1])
+        Fout = Fin if self.Fout is None else self.Fout
+        if self.depth_wise and Fout != Fin:
+            raise AssertionError("For depthwise convolutions, Fout has to be None or equal to Fin")
+        stddev = 1 / np.sqrt(Fin * (self.K + 0.5) / 2)
+        shape = (Fin, self.K) if self.depth_wise else (self.K * Fin, Fout)
+        self._build(Fin, Fout, shape, stddev, device=device, dtype=dtype)
+        return self
+
     def forward(self, input_tensor):
         input_tensor = torch.as_tensor(input_tensor)
         N, M, Fin = input_tensor.shape
@@ -164,9 +176,7 @@ class Chebyshev(_GraphPolynomial):
         if self.depth_wise and Fout != Fin:
             raise AssertionError("For depthwise convolutions, Fout has to be None or equal to Fin")
         if self.kernel is None:
-            stddev = 1 / np.sqrt(Fin * (self.K + 0.5) / 2)
-            shape = (Fin, self.K) if self.depth_wise else (self.K * Fin, Fout)
-            self._build(Fin, Fout, shape, stddev, device=input_tensor.device, dtype=input_tensor.dtype)
+            self.build(input_tensor.shape, device=input_tensor.device, dtype=input_tensor.dtype)
         x0 = input_tensor.permute(1, 2, 0).reshape(M, -1)
         stack = [x0]
         if self.K > 1:
@@ -208,12 +218,18 @@ class Monomial(_GraphPolynomial):
         self.n_matmul_splits = n_matmul_splits
         self.register_buffer("sparse_L", _to_sparse_tensor(L))
 
+    def build(self, input_shape, device=None, dtype=None):
+        Fin = int(input_shape[-1])
+        Fout = Fin if self.Fout is None else self.Fout
+        self._build(Fin, Fout, (self.K * Fin, Fout), 0.1, device=device, dtype=dtype)
+        return self
+
     def forward(self, input_tensor):
         input_tensor = torch.as_tensor(input_tensor)
         N, M, Fin = input_tensor.shape
         Fout = Fin if self.Fout is None else self.Fout
         if self.kernel is None:
-            self._build(Fin, Fout, (self.K * Fin, Fout), 0.1, device=input_tensor.device, dtype=input_tensor.dtype)
+            self.build(input_tensor.shape, device=input_tensor.device, dtype=input_tensor.dtype)
         x0 = input_tensor.permute(1, 2, 0).reshape(M, -1)
         stack = [x0]
         for _ in range(1, self.K):
@@ -254,23 +270,35 @@ class GCNN_ResidualLayer(nn.Module):
             raise IOError(f"Layertype not understood: {layer_type}")
         self.bn1 = self.bn2 = None
         if use_bn:
-            if norm_type == "layer_norm":
-                self.bn1 = "lazy"  # placeholder; initialized on first forward
-                self.bn2 = "lazy"
-            elif norm_type == "batch_norm":
-                self.bn1 = self.bn2 = None
-            else:
+            if norm_type not in {"layer_norm", "batch_norm"}:
                 raise ValueError(f"norm_type <{norm_type}> not understood!")
             self.norm_type = norm_type
 
+    def build(self, input_shape, device=None, dtype=None):
+        batch, nodes, Fin = tuple(input_shape)
+        self.layer1.build((batch, nodes, Fin), device=device, dtype=dtype)
+        Fmid = Fin if self.layer1.Fout is None else self.layer1.Fout
+        if self.use_bn:
+            if self.norm_type == "layer_norm":
+                self.bn1 = nn.LayerNorm((nodes, Fmid)).to(device=device, dtype=dtype)
+            else:
+                self.bn1 = NodeBatchNorm1d(Fmid).to(device=device, dtype=dtype)
+        self.layer2.build((batch, nodes, Fmid), device=device, dtype=dtype)
+        Fout = Fmid if self.layer2.Fout is None else self.layer2.Fout
+        if self.use_bn:
+            if self.norm_type == "layer_norm":
+                self.bn2 = nn.LayerNorm((nodes, Fout)).to(device=device, dtype=dtype)
+            else:
+                self.bn2 = NodeBatchNorm1d(Fout).to(device=device, dtype=dtype)
+        return self
+
     def _norm(self, name, x):
         module = getattr(self, name)
-        if module is None or module == "lazy":
+        if module is None:
             module = nn.LayerNorm(x.shape[1:]) if self.norm_type == "layer_norm" else NodeBatchNorm1d(x.shape[-1])
             module = module.to(device=x.device, dtype=x.dtype)
             setattr(self, name, module)
-        else:
-            module.to(device=x.device, dtype=x.dtype)
+        module.to(device=x.device, dtype=x.dtype)
         return module(x)
 
     def forward(self, input_tensor):
@@ -312,19 +340,25 @@ class Bernstein(_GraphPolynomial):
         self.n_matmul_splits = n_matmul_splits
         self.register_buffer("sparse_L", _to_sparse_tensor(L, scale=0.75))
 
+    def build(self, input_shape, device=None, dtype=None):
+        Fin = int(input_shape[-1])
+        Fout = Fin if self.Fout is None else self.Fout
+        self._build(
+            Fin,
+            Fout,
+            ((self.K + 1) * Fin, Fout),
+            np.sqrt(6 / (Fin + Fout)),
+            device=device,
+            dtype=dtype,
+        )
+        return self
+
     def forward(self, input_tensor):
         input_tensor = torch.as_tensor(input_tensor)
         N, M, Fin = input_tensor.shape
         Fout = Fin if self.Fout is None else self.Fout
         if self.kernel is None:
-            self._build(
-                Fin,
-                Fout,
-                ((self.K + 1) * Fin, Fout),
-                np.sqrt(6 / (Fin + Fout)),
-                device=input_tensor.device,
-                dtype=input_tensor.dtype,
-            )
+            self.build(input_tensor.shape, device=input_tensor.device, dtype=input_tensor.dtype)
         x0 = input_tensor.permute(1, 2, 0).reshape(M, -1)
         stack = []
         for i in range(self.K + 1):
