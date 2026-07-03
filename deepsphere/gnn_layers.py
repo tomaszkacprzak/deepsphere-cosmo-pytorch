@@ -8,7 +8,6 @@ from torch.nn import functional as F
 
 from . import utils
 
-
 _UNSUPPORTED_TF_KWARGS = {
     "regularizer",
     "kernel_regularizer",
@@ -67,8 +66,8 @@ def _sparse_mm(sparse_matrix, dense_matrix):
     return torch.sparse.mm(sparse_matrix, dense_matrix)
 
 
-def _init_tensor(shape, initializer, default_stddev):
-    tensor = torch.empty(*shape)
+def _init_tensor(shape, initializer, default_stddev, device=None, dtype=torch.float32):
+    tensor = torch.empty(*shape, device=device, dtype=dtype)
     if initializer is None:
         nn.init.trunc_normal_(tensor, std=default_stddev)
     elif callable(initializer):
@@ -80,11 +79,11 @@ def _init_tensor(shape, initializer, default_stddev):
             except TypeError:
                 value = initializer(tensor)
         if isinstance(value, torch.Tensor):
-            tensor = value.detach().clone().to(dtype=torch.float32)
+            tensor = value.detach().clone().to(device=device, dtype=dtype)
         elif value is not None:
-            tensor = torch.as_tensor(value, dtype=torch.float32)
+            tensor = torch.as_tensor(value, device=device, dtype=dtype)
     else:
-        tensor = torch.as_tensor(initializer, dtype=torch.float32)
+        tensor = torch.as_tensor(initializer, device=device, dtype=dtype)
     return tensor
 
 
@@ -114,17 +113,21 @@ class _GraphPolynomial(nn.Module):
         self.bias = None
         self.bn = None
 
-    def _build(self, Fin, Fout, kernel_shape, default_stddev):
-        self.kernel = nn.Parameter(_init_tensor(kernel_shape, self.initializer, default_stddev))
+    def _build(self, Fin, Fout, kernel_shape, default_stddev, device=None, dtype=None):
+        dtype = dtype or torch.get_default_dtype()
+        self.kernel = nn.Parameter(
+            _init_tensor(kernel_shape, self.initializer, default_stddev, device=device, dtype=dtype)
+        )
         if self.use_bias:
-            self.bias = nn.Parameter(torch.zeros(1, 1, Fout))
+            self.bias = nn.Parameter(torch.zeros(1, 1, Fout, device=device, dtype=dtype))
         if self.use_bn:
-            self.bn = NodeBatchNorm1d(Fout, momentum=0.1, eps=1e-5, affine=False)
+            self.bn = NodeBatchNorm1d(Fout, momentum=0.1, eps=1e-5, affine=False).to(device=device, dtype=dtype)
 
     def _finalize(self, x, M, Fout):
         kernel = self.kernel.to(device=x.device, dtype=x.dtype)
         x = torch.matmul(x, kernel).reshape(-1, M, Fout)
         if self.bn is not None:
+            self.bn.to(device=x.device, dtype=x.dtype)
             x = self.bn(x)
         if self.bias is not None:
             x = x + self.bias.to(device=x.device, dtype=x.dtype)
@@ -163,7 +166,7 @@ class Chebyshev(_GraphPolynomial):
         if self.kernel is None:
             stddev = 1 / np.sqrt(Fin * (self.K + 0.5) / 2)
             shape = (Fin, self.K) if self.depth_wise else (self.K * Fin, Fout)
-            self._build(Fin, Fout, shape, stddev)
+            self._build(Fin, Fout, shape, stddev, device=input_tensor.device, dtype=input_tensor.dtype)
         x0 = input_tensor.permute(1, 2, 0).reshape(M, -1)
         stack = [x0]
         if self.K > 1:
@@ -175,11 +178,13 @@ class Chebyshev(_GraphPolynomial):
             x0, x1 = x1, x2
         x = torch.stack(stack, dim=0).reshape(self.K, M, Fin, -1).permute(3, 1, 2, 0)
         if self.depth_wise:
-            x = torch.einsum("ijkl,kl->ijk", x, self.kernel)
+            kernel = self.kernel.to(device=x.device, dtype=x.dtype)
+            x = torch.einsum("ijkl,kl->ijk", x, kernel)
             if self.bn is not None:
+                self.bn.to(device=x.device, dtype=x.dtype)
                 x = self.bn(x)
             if self.bias is not None:
-                x = x + self.bias
+                x = x + self.bias.to(device=x.device, dtype=x.dtype)
             return self.activation(x) if self.activation is not None else x
         return self._finalize(x.reshape(-1, Fin * self.K), M, Fout)
 
@@ -208,7 +213,7 @@ class Monomial(_GraphPolynomial):
         N, M, Fin = input_tensor.shape
         Fout = Fin if self.Fout is None else self.Fout
         if self.kernel is None:
-            self._build(Fin, Fout, (self.K * Fin, Fout), 0.1)
+            self._build(Fin, Fout, (self.K * Fin, Fout), 0.1, device=input_tensor.device, dtype=input_tensor.dtype)
         x0 = input_tensor.permute(1, 2, 0).reshape(M, -1)
         stack = [x0]
         for _ in range(1, self.K):
@@ -262,7 +267,10 @@ class GCNN_ResidualLayer(nn.Module):
         module = getattr(self, name)
         if module is None or module == "lazy":
             module = nn.LayerNorm(x.shape[1:]) if self.norm_type == "layer_norm" else NodeBatchNorm1d(x.shape[-1])
+            module = module.to(device=x.device, dtype=x.dtype)
             setattr(self, name, module)
+        else:
+            module.to(device=x.device, dtype=x.dtype)
         return module(x)
 
     def forward(self, input_tensor):
@@ -309,7 +317,14 @@ class Bernstein(_GraphPolynomial):
         N, M, Fin = input_tensor.shape
         Fout = Fin if self.Fout is None else self.Fout
         if self.kernel is None:
-            self._build(Fin, Fout, ((self.K + 1) * Fin, Fout), np.sqrt(6 / (Fin + Fout)))
+            self._build(
+                Fin,
+                Fout,
+                ((self.K + 1) * Fin, Fout),
+                np.sqrt(6 / (Fin + Fout)),
+                device=input_tensor.device,
+                dtype=input_tensor.dtype,
+            )
         x0 = input_tensor.permute(1, 2, 0).reshape(M, -1)
         stack = []
         for i in range(self.K + 1):

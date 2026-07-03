@@ -186,7 +186,7 @@ class HealpyGCNN(nn.Module):
         for layer in self.layers_use:
             x = layer(x)
         return x
-      
+
     call = forward
 
     def initialize(self, input_shape, device=None, dtype=None):
@@ -196,7 +196,23 @@ class HealpyGCNN(nn.Module):
         full ``(batch, nodes, channels)`` input shape before creating an
         optimizer or before loading a saved ``state_dict`` into a fresh model.
         """
-        dummy = torch.zeros(tuple(input_shape), device=device, dtype=dtype or torch.get_default_dtype())
+        if device is None:
+            try:
+                device = next(self.parameters()).device
+            except StopIteration:
+                try:
+                    device = next(self.buffers()).device
+                except StopIteration:
+                    device = None
+        if dtype is None:
+            try:
+                dtype = next(self.parameters()).dtype
+            except StopIteration:
+                try:
+                    dtype = next(buffer for buffer in self.buffers() if buffer.is_floating_point()).dtype
+                except StopIteration:
+                    dtype = torch.get_default_dtype()
+        dummy = torch.zeros(tuple(input_shape), device=device, dtype=dtype)
         was_training = self.training
         self.eval()
         with torch.no_grad():
@@ -204,7 +220,6 @@ class HealpyGCNN(nn.Module):
         self.train(was_training)
         self._initialized = True
         return self
-
 
     def build(self, input_shape=None, **kwargs):
         """Materialize lazy parameters using a full ``(batch, nodes, channels)`` input shape."""
@@ -257,7 +272,9 @@ class HealpyGCNN(nn.Module):
     def _get_filter_coeffs(self, layer: gnn.Chebyshev, ind_in=None, ind_out=None):
         K, Fout = layer.K, layer.Fout
         if layer.kernel is None:
-            raise RuntimeError("Layer parameters are not initialized. Run a forward pass or initialize(input_shape) first.")
+            raise RuntimeError(
+                "Layer parameters are not initialized. Run a forward pass or initialize(input_shape) first."
+            )
         trained_weights = layer.kernel.detach().cpu().numpy()
         if Fout is None:
             Fout = int(np.sqrt(np.prod(trained_weights.shape) // K))
@@ -332,7 +349,9 @@ class HealpyGCNN(nn.Module):
             gsp_filters.append(filters.Chebyshev(pygsp_graph, weight))
         return gsp_filters
 
-    def plot_chebyshev_coeffs(self, layer, ind_in=None, ind_out=None, ax=None, title="Chebyshev coefficients - layer {}"):
+    def plot_chebyshev_coeffs(
+        self, layer, ind_in=None, ind_out=None, ax=None, title="Chebyshev coefficients - layer {}"
+    ):
         weights = self.get_gsp_filters(layer, ind_in, ind_out, return_weights=True)
         if ax is None:
             ax = plt.gca()
